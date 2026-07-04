@@ -1,0 +1,25 @@
+# Flet UI
+flet==0.85.1
+flet-charts==0.85.1
+darkdetect>=0.8.0
+
+# Analysis / data
+pandas>=2.0
+numpy>=1.24
+yfinance>=0.2
+
+# Live streaming (Finnhub WebSocket)
+websocket-client>=1.7
+
+# PDF statement import
+pdfplumber>=0.11
+
+# Local LLM backends
+lmstudio==1.5.0
+ollama>=0.4.0
+openai>=1.0.0
+beautifulsoup4>=4.12
+requests>=2.31
+
+# Tests
+pytest>=8.0

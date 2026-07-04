@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Secrets
+.env
+.env.local
+secrets.json
+api_keys.txt
+
+# App data
+data/settings.json
+exports/logs/*.log
+market_data.db
+:memory:
+canslim_backtest_results.csv
+cache/
+
+# Build
+build/
+dist/
+*.spec

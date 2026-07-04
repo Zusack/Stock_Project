@@ -1,0 +1,43 @@
+# Full dependency set for desktop development (Linux / Windows / macOS).
+# Install with: pip install -r requirements-desktop.txt
+#
+# APK / flet build uses the slimmer requirements.txt in this repo (see that file).
+
+# Core Framework
+
+flet==0.85.1
+flet-charts==0.85.1
+# Same Hub client as mobile (catalog/download); reuse shared_core + hf_hub in a future Model Manager modal.
+huggingface_hub>=0.20.0,<1.0
+lmstudio==1.5.0
+llama-cpp-python==0.3.16
+
+# LLM Backend Providers (install as needed)
+
+ollama>=0.4.0           # Required for Ollama backend
+openai>=1.0.0           # Required for vLLM backend (OpenAI-compatible client)
+# llama-cpp-python       # Required for GGUF backend (install separately for GPU support)
+#   GPU: CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
+#   CPU: pip install llama-cpp-python
+
+# System & Hardware Monitoring
+
+psutil>=5.9.0
+
+# Data Analysis & Export
+
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# NLP & Scoring Metrics
+
+nltk>=3.8.1
+rouge-score>=0.1.2
+bert-score>=0.3.13
+transformers>=4.30.0
+torch>=2.0.0  # Required for BERTScore (even on CPU)
+
+# Utilities
+
+pyperclip>=1.8.2
+darkdetect>=0.8.0
