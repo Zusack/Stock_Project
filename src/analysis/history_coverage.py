@@ -432,3 +432,196 @@ def set_fundamentals_last_at(db_path: str | os.PathLike, ticker: str) -> None:
             (now, sym),
         )
         conn.commit()
+
+
+_PREFLIGHT_BENCHMARKS: tuple[str, ...] = ("SPY", "^GSPC", "^DJI", "^IXIC")
+
+
+@dataclass
+class IngestPreflightResult:
+    """Fast bulk-ingest gate before per-ticker planning."""
+
+    should_run: bool
+    message: str
+    calendar_required_day: date
+    effective_required_day: date
+    benchmark_max_dates: dict[str, date | None]
+    empty_symbols: int = 0
+    stale_price_symbols: int = 0
+    gap_symbols: int = 0
+
+
+def _benchmark_tickers_for_preflight() -> tuple[str, ...]:
+    cfg = stock_config()
+    market = (cfg.market_ticker or "^GSPC").strip().upper()
+    ordered: list[str] = []
+    for sym in (market, *_PREFLIGHT_BENCHMARKS):
+        if sym and sym not in ordered:
+            ordered.append(sym)
+    return tuple(ordered)
+
+
+def _latest_history_dates(
+    db_path: str | os.PathLike,
+    tickers: tuple[str, ...],
+) -> dict[str, date | None]:
+    if not tickers:
+        return {}
+    placeholders = ",".join("?" * len(tickers))
+    sql = (
+        f"SELECT Ticker, MAX(Date) AS max_date FROM stock_history "
+        f"WHERE Ticker IN ({placeholders}) GROUP BY Ticker"
+    )
+    latest: dict[str, date | None] = {sym: None for sym in tickers}
+    with db_connection(db_path, readonly=True) as conn:
+        rows = conn.execute(sql, tickers).fetchall()
+    for ticker, max_date in rows:
+        sym = str(ticker).strip().upper()
+        if not max_date:
+            latest[sym] = None
+            continue
+        try:
+            latest[sym] = date.fromisoformat(str(max_date)[:10])
+        except ValueError:
+            latest[sym] = None
+    return latest
+
+
+def _effective_required_trading_day(
+    calendar_required: date,
+    benchmark_max_dates: dict[str, date | None],
+) -> date:
+    """Use benchmark bars to infer the latest session with settled market data."""
+    observed = [d for d in benchmark_max_dates.values() if d is not None]
+    if not observed:
+        return calendar_required
+    market_latest = max(observed)
+    if market_latest >= calendar_required:
+        return calendar_required
+    return market_latest
+
+
+def _scope_where_clause(scope: str) -> tuple[str, tuple[Any, ...]]:
+    scope = (scope or "universe").strip().lower()
+    if scope == "focus":
+        return " AND w.pool = 'focus'", ()
+    return "", ()
+
+
+def _count_price_work_needed(
+    db_path: str | os.PathLike,
+    *,
+    scope: str,
+    effective_required_day: date,
+) -> tuple[int, int, int]:
+    """Return (empty, stale, gap) symbol counts for active registry rows."""
+    init_coverage_schema(db_path)
+    scope_sql, scope_params = _scope_where_clause(scope)
+    required = effective_required_day.isoformat()
+    sql = f"""
+        SELECT
+            SUM(CASE WHEN h.max_date IS NULL THEN 1 ELSE 0 END) AS empty_n,
+            SUM(CASE WHEN h.max_date IS NOT NULL AND h.max_date < ? THEN 1 ELSE 0 END) AS stale_n,
+            SUM(
+                CASE
+                    WHEN w.coverage_status = 'gaps'
+                         AND COALESCE(w.gap_count, 0) > 0
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS gap_n
+        FROM watchlist_tickers w
+        LEFT JOIN (
+            SELECT Ticker, MAX(Date) AS max_date
+            FROM stock_history
+            GROUP BY Ticker
+        ) h ON h.Ticker = w.symbol
+        WHERE w.skip_ingest = 0
+        {scope_sql}
+    """
+    with db_connection(db_path, readonly=True) as conn:
+        row = conn.execute(sql, (required, *scope_params)).fetchone()
+    if not row:
+        return 0, 0, 0
+    return int(row[0] or 0), int(row[1] or 0), int(row[2] or 0)
+
+
+def assess_ingest_preflight(
+    db_path: str | os.PathLike,
+    *,
+    scope: str = "universe",
+    mode: str = "smart",
+    force_full: bool = False,
+    retry_dead: bool = False,
+) -> IngestPreflightResult:
+    """
+    Decide whether a smart bulk ingest can find new price data.
+
+    Uses benchmark index history to detect holidays/weekends where the calendar
+    expects a session that has not published bars yet, then counts symbols that
+    still need price work with one SQL pass instead of per-ticker Yahoo calls.
+    """
+    calendar_required = last_completed_trading_day()
+    benchmarks = _benchmark_tickers_for_preflight()
+    benchmark_dates = _latest_history_dates(db_path, benchmarks)
+    effective_required = _effective_required_trading_day(calendar_required, benchmark_dates)
+    empty_n, stale_n, gap_n = _count_price_work_needed(
+        db_path,
+        scope=scope,
+        effective_required_day=effective_required,
+    )
+
+    mode_norm = (mode or "smart").strip().lower()
+    if force_full or mode_norm in ("full", "resume") or retry_dead:
+        return IngestPreflightResult(
+            should_run=True,
+            message="",
+            calendar_required_day=calendar_required,
+            effective_required_day=effective_required,
+            benchmark_max_dates=benchmark_dates,
+            empty_symbols=empty_n,
+            stale_price_symbols=stale_n,
+            gap_symbols=gap_n,
+        )
+
+    price_work = empty_n + stale_n + gap_n
+    if price_work > 0:
+        return IngestPreflightResult(
+            should_run=True,
+            message="",
+            calendar_required_day=calendar_required,
+            effective_required_day=effective_required,
+            benchmark_max_dates=benchmark_dates,
+            empty_symbols=empty_n,
+            stale_price_symbols=stale_n,
+            gap_symbols=gap_n,
+        )
+
+    observed = [d for d in benchmark_dates.values() if d is not None]
+    through_label = effective_required.isoformat()
+    if observed:
+        bench_label = ", ".join(
+            f"{sym}={d.isoformat()}"
+            for sym, d in sorted(benchmark_dates.items())
+            if d is not None
+        )
+        detail = (
+            f"Market benchmarks are current through {through_label} ({bench_label}). "
+            "No new data available since the last ingest."
+        )
+    else:
+        detail = (
+            f"Price history is current through {through_label}. "
+            "No new data available since the last ingest."
+        )
+
+    return IngestPreflightResult(
+        should_run=False,
+        message=detail,
+        calendar_required_day=calendar_required,
+        effective_required_day=effective_required,
+        benchmark_max_dates=benchmark_dates,
+        empty_symbols=empty_n,
+        stale_price_symbols=stale_n,
+        gap_symbols=gap_n,
+    )

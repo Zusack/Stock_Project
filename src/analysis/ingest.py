@@ -26,6 +26,7 @@ from src.analysis.fundamentals_sources.rate_limits import (
 )
 from src.analysis.history_coverage import (
     TickerIngestPlan,
+    assess_ingest_preflight,
     build_ticker_plan,
     clear_ingest_skip_lookup,
     init_coverage_schema,
@@ -564,6 +565,8 @@ def _run_enrich_step(plan: TickerIngestPlan, result_log: dict[str, Any]) -> None
         try:
             info = stock.info
             profile_data = {
+                # Still ingested for the Fundamentals panel only — not used in CANSLIM.
+                # Yahoo heldPercentInstitutions is stale/unreliable vs IBD proprietary "I".
                 "Inst_Ownership": info.get("heldPercentInstitutions"),
                 "Trailing_PE": info.get("trailingPE"),
                 "Forward_PE": info.get("forwardPE"),
@@ -908,6 +911,54 @@ def ingest_stock_data(
             "run_progress": {},
             "error": "No tickers to ingest",
         }
+
+    if not active_run_id and ingest_mode == "smart" and not force_full_run:
+        preflight = assess_ingest_preflight(
+            db_path,
+            scope=ingest_scope,
+            mode=ingest_mode,
+            force_full=force_full_run,
+            retry_dead=cfg.retry_dead_tickers,
+        )
+        if not preflight.should_run:
+            skip_msg = preflight.message or "No new data available since the last ingest."
+            report(1.0, skip_msg)
+            clear_ingest_skip_lookup()
+            _log_ingest(
+                "Ingest skipped — no new market data",
+                scope=ingest_scope,
+                calendar_required=preflight.calendar_required_day.isoformat(),
+                effective_required=preflight.effective_required_day.isoformat(),
+                benchmarks={
+                    sym: (d.isoformat() if d else None)
+                    for sym, d in preflight.benchmark_max_dates.items()
+                },
+            )
+            return {
+                "total": len(tickers),
+                "processed": 0,
+                "success": 0,
+                "skipped": len(tickers),
+                "failed": 0,
+                "skipped_archived": skipped_archived,
+                "warnings": 0,
+                "db_path": os.path.abspath(db_path),
+                "results": [],
+                "run_id": None,
+                "paused": False,
+                "run_progress": {},
+                "ingest_scope": ingest_scope,
+                "no_new_data": True,
+                "message": skip_msg,
+                "preflight": {
+                    "calendar_required_day": preflight.calendar_required_day.isoformat(),
+                    "effective_required_day": preflight.effective_required_day.isoformat(),
+                    "benchmark_max_dates": {
+                        sym: (d.isoformat() if d else None)
+                        for sym, d in preflight.benchmark_max_dates.items()
+                    },
+                },
+            }
 
     if not active_run_id:
         report(0.0, f"Preparing ingest ({len(tickers)} tickers)…")

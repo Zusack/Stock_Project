@@ -14,12 +14,11 @@ from src.analysis.market_context import load_latest_market_context
 from src.analysis.market_news import FeedHeadline, build_dashboard_news_feed, clear_news_cache
 from src.analysis.portfolio_schema import list_accounts, list_holdings
 from src.analysis.quote_snapshot import get_quotes_bulk
-from src.analysis.ticker_registry import list_focus_symbols
-from src.analysis.watchlist_schema import list_members, list_watchlists
+from src.analysis.watchlist_schema import resolve_watchlist_symbols
 from src.services.event_bus import event_bus
 from src.services.stock_config import stock_config
 from src.services.tab_indices import TAB_PORTFOLIO
-from src.utils.format_utils import format_change, format_currency, format_percent, slice_price_df
+from src.utils.format_utils import format_change, format_currency, format_percent
 from src.views.base_view import BaseView
 from src.views.ui_helpers import navigate_to_stock_detail
 from src.views.components.chart_factory import chart_empty_state, chart_panel_container
@@ -28,13 +27,19 @@ from src.views.components.chart_range import (
     DEFAULT_CHART_RANGE,
     chart_range_label,
     chart_range_selector,
+    chart_toggle_selector,
     selected_chart_range,
+    selected_chart_toggles,
 )
 from src.views.components.model_setup_bar import ModelSetupBar
 from src.views.components.display import StatusBanner
 from src.views.components.layouts import SectionHeader, ViewTitleBar
 from src.views.components.news_feed import build_feed_headline_card
-from src.views.components.price_charts import IndexSeries, build_index_comparison_chart
+from src.views.components.price_charts import (
+    IndexSeries,
+    build_index_comparison_chart,
+    prepare_market_index_series,
+)
 from src.views.theme import ThemeHelper
 
 _MARKET_INDICES: tuple[tuple[str, str], ...] = (
@@ -43,6 +48,9 @@ _MARKET_INDICES: tuple[tuple[str, str], ...] = (
     ("^IXIC", "Nasdaq"),
 )
 _INDEX_COLOR_KEYS = {"^GSPC": "price", "^DJI": "ma_short", "^IXIC": "ma_long"}
+_INDEX_TOGGLE_OPTIONS: tuple[tuple[str, str], ...] = _MARKET_INDICES
+_SMA_TOGGLE_KEY = "sma50"
+_SMA_TOGGLE_OPTIONS: tuple[tuple[str, str], ...] = ((_SMA_TOGGLE_KEY, "50 SMA"),)
 
 
 
@@ -88,6 +96,21 @@ class DashboardView(BaseView):
             selected=self._interval_key,
             on_change=self._on_interval_changed,
         )
+        default_indices = [ticker for ticker, _ in _MARKET_INDICES]
+        self.index_selector = chart_toggle_selector(
+            _INDEX_TOGGLE_OPTIONS,
+            selected=default_indices,
+            on_change=self._on_index_toggles_changed,
+            allow_multiple=True,
+            allow_empty=True,
+        )
+        self.sma_toggle = chart_toggle_selector(
+            _SMA_TOGGLE_OPTIONS,
+            selected=[],
+            on_change=self._on_sma_toggle_changed,
+            allow_multiple=False,
+            allow_empty=True,
+        )
         self.index_chart_slot = ft.Container(content=chart_empty_state(page, "Loading…"))
         self.hint_text = ft.Text("", size=12, color=ThemeHelper.text_muted(page))
 
@@ -117,7 +140,11 @@ class DashboardView(BaseView):
                 spacing=12,
             ),
             SectionHeader("Market indices", icon=ft.Icons.SHOW_CHART, page_ref=page),
-            ft.Row([self.interval_selector]),
+            ft.Row(
+                [self.interval_selector, self.index_selector, self.sma_toggle],
+                spacing=8,
+                wrap=True,
+            ),
             chart_panel_container(page, self.index_chart_slot, panel_height=400),
             SectionHeader("Watchlist movers", icon=ft.Icons.TRENDING_UP, page_ref=page),
             self.movers_list,
@@ -143,14 +170,8 @@ class DashboardView(BaseView):
         all_holdings = list_holdings(cfg.db_path)
         pos_count = len(all_holdings)
 
-        # Watchlist movers — focus symbols or first named watchlist
-        mover_syms: list[str] = []
-        focus = list_focus_symbols(cfg.db_path)
-        mover_syms = [r.symbol for r in focus[:10]]
-        if not mover_syms:
-            wls = list_watchlists(cfg.db_path)
-            if wls:
-                mover_syms = [m.ticker for m in list_members(cfg.db_path, wls[0].id)[:10]]
+        # Watchlist movers — saved watchlist first, registry focus fallback
+        mover_syms = resolve_watchlist_symbols(cfg.db_path, limit=10)
         quotes = get_quotes_bulk(cfg.db_path, mover_syms) if mover_syms else {}
 
         news_feed = build_dashboard_news_feed(
@@ -300,26 +321,36 @@ class DashboardView(BaseView):
         )
         self._render_indices_chart()
 
+    def _on_index_toggles_changed(self, e) -> None:
+        self._render_indices_chart()
+
+    def _on_sma_toggle_changed(self, e) -> None:
+        self._render_indices_chart()
+
     def _render_indices_chart(self) -> None:
         if not self._latest_market_data:
             return
-        series_specs: list[IndexSeries] = []
         interval = self._interval_key
+        active_tickers = set(
+            selected_chart_toggles(
+                self.index_selector,
+                default=[ticker for ticker, _ in _MARKET_INDICES],
+            )
+        )
+        show_sma = _SMA_TOGGLE_KEY in selected_chart_toggles(self.sma_toggle, default=[])
+        series_specs: list[IndexSeries] = []
         for ticker, label in _MARKET_INDICES:
-            df = slice_price_df(self._latest_market_data.get(ticker), interval)
-            if df is None or df.empty:
+            if ticker not in active_tickers:
                 continue
-            close = df["Adj Close"].astype(float).dropna()
-            if len(close) < 2:
-                continue
-            base = float(close.iloc[0])
-            if base == 0:
-                continue
-            pct = [((float(p) / base) - 1.0) * 100.0 for p in close.tolist()]
-            dates = [pd.Timestamp(x).strftime("%Y-%m-%d") for x in close.index]
             color = ThemeHelper.chart_named(self.page_ref, _INDEX_COLOR_KEYS.get(ticker, "price"))
-            series_specs.append(
-                IndexSeries(label=label, values=pct, color=color, timestamps=dates)
+            series_specs.extend(
+                prepare_market_index_series(
+                    self._latest_market_data.get(ticker),
+                    label=label,
+                    color=color,
+                    interval_key=interval,
+                    include_sma50=show_sma,
+                )
             )
         if series_specs:
             self.index_chart_slot.content = build_index_comparison_chart(
@@ -328,6 +359,11 @@ class DashboardView(BaseView):
                 interval_key=interval,
                 height=300,
                 subtitle=f"Interval: {chart_range_label(interval)}",
+            )
+        else:
+            self.index_chart_slot.content = chart_empty_state(
+                self.page_ref,
+                "Select at least one index to chart.",
             )
         try:
             self.index_chart_slot.update()

@@ -42,6 +42,7 @@ class PortfolioView(BaseView):
         super().__init__(page)
         self._selected_account_id: int | None = None
         self._parsed_statement = None
+        self._refocus_holding_ticker = False
 
         self.account_dropdown = InputStyles.dropdown(
             page,
@@ -83,9 +84,15 @@ class PortfolioView(BaseView):
         self.async_status = AsyncStatusRow(page)
 
         # Manual holding entry
-        self.h_ticker = InputStyles.text_field(page, label="Ticker", width=100, on_blur=on_ticker_field_blur())
-        self.h_qty = InputStyles.text_field(page, label="Quantity", width=100)
-        self.h_cost = InputStyles.text_field(page, label="Avg cost", width=100)
+        self.h_ticker = InputStyles.text_field(
+            page,
+            label="Ticker",
+            width=100,
+            on_blur=on_ticker_field_blur(),
+            on_submit=self._on_save_holding,
+        )
+        self.h_qty = InputStyles.text_field(page, label="Quantity", width=100, on_submit=self._on_save_holding)
+        self.h_cost = InputStyles.text_field(page, label="Avg cost", width=100, on_submit=self._on_save_holding)
 
         # Manual trade entry
         self.t_date = InputStyles.text_field(page, label="Date (YYYY-MM-DD)", width=140)
@@ -269,6 +276,9 @@ class PortfolioView(BaseView):
 
         try:
             self.update()
+            if self._refocus_holding_ticker:
+                self._refocus_holding_ticker = False
+                self.h_ticker.focus()
         except RuntimeError:
             pass
 
@@ -335,7 +345,18 @@ class PortfolioView(BaseView):
 
             def _ui():
                 if result.get("ok"):
+                    self.h_ticker.value = ""
+                    self.h_qty.value = ""
+                    self.h_cost.value = ""
+                    self._refocus_holding_ticker = True
                     show_snackbar(self.page_ref, f"Saved {sym}", severity="success")
+                    try:
+                        self.h_ticker.update()
+                        self.h_qty.update()
+                        self.h_cost.update()
+                        self.h_ticker.focus()
+                    except RuntimeError:
+                        pass
                     self.refresh_data_async(label="portfolio_save")
                 else:
                     show_snackbar(self.page_ref, result.get("error", "Failed"), severity="error")

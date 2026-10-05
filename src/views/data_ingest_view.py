@@ -1431,9 +1431,11 @@ class DataIngestView(BaseView):
                 summary_holder.update(summary)
                 from datetime import datetime, timezone
 
-                if not summary.get("paused"):
+                if not summary.get("paused") and not summary.get("no_new_data"):
                     cfg.set_last_ingest_at(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
-                if summary.get("paused"):
+                if summary.get("no_new_data"):
+                    msg = summary.get("message") or "No new data available since the last ingest."
+                elif summary.get("paused"):
                     pending = summary.get("run_progress", {}).get("pending", "?")
                     msg = (
                         f"Paused — {pending} tickers remaining. "
@@ -1468,7 +1470,14 @@ class DataIngestView(BaseView):
                 self.status_text.value = msg + elapsed_note
                 self._append_log(msg + elapsed_note)
                 self._flush_session_log_to_file()
-                sev = "warning" if summary_holder.get("paused") else ("success" if "Done" in msg else "error")
+                if summary_holder.get("no_new_data"):
+                    sev = "success"
+                elif summary_holder.get("paused"):
+                    sev = "warning"
+                elif "Done" in msg:
+                    sev = "success"
+                else:
+                    sev = "error"
                 show_snackbar(self.page_ref, msg[:120], severity=sev)
                 try:
                     from src.services.event_bus import event_bus

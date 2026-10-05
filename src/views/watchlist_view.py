@@ -146,9 +146,13 @@ class WatchlistView(BaseView):
     def _fetch_data(self) -> dict:
         cfg = stock_config()
         db = cfg.db_path
-        from src.analysis.watchlist_schema import sync_focus_to_default_watchlist
+        from src.analysis.watchlist_schema import (
+            sync_focus_to_default_watchlist,
+            sync_watchlist_members_to_registry,
+        )
 
         sync_focus_to_default_watchlist(db)
+        sync_watchlist_members_to_registry(db)
         registry.ensure_registry(db)
         watchlists = list_watchlists(db)
         wl_id = self._selected_watchlist_id

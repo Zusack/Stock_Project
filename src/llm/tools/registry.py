@@ -6,7 +6,7 @@ import json
 from typing import Any, Callable
 
 from src.analysis.intelligence_schema import save_ai_insight
-from src.analysis.leaderboard import score_ticker
+from src.analysis.ticker_evaluation import score_ticker_with_cache
 from src.analysis.llm_store import (
     list_open_questions,
     record_finding,
@@ -45,22 +45,23 @@ def fetch_news(ticker: str, limit: int = 10) -> str:
 
 
 def get_canslim(ticker: str) -> str:
-    """Get CANSLIM / leaderboard scoring metrics for a ticker."""
-    from src.analysis.leaderboard_scoring import CANSLIM_RULE_COUNT
+    """Get CANSLM / leaderboard scoring metrics for a ticker."""
+    from src.analysis.canslim_core import CANSLM_RULE_COUNT
 
     cfg = stock_config()
-    row = score_ticker(ticker.upper(), cfg.db_path, cfg.market_ticker)
+    row = score_ticker_with_cache(ticker.upper(), cfg.db_path, cfg.market_ticker)
     if row is None:
-        return json.dumps({"error": f"No CANSLIM data for {ticker.upper()}"})
+        return json.dumps({"error": f"No CANSLM data for {ticker.upper()}"})
     data = {
         "ticker": row.ticker,
         "composite_score": row.composite_score,
         "canslim_score": row.canslim_score,
-        "canslim_max": CANSLIM_RULE_COUNT,
-        "canslim_scale": (
-            f"Leaderboard score is n/{CANSLIM_RULE_COUNT} on letters C, A, N, S, L, M. "
-            "Stock Detail interactive analysis is n/7 and also includes Institutions (I)."
+        "canslim_max": CANSLM_RULE_COUNT,
+        "canslm_scale": (
+            f"Leaderboard score is n/{CANSLM_RULE_COUNT} on letters C, A, N, S, L, M. "
+            "IBD institutional sponsorship (I) is not scored (proprietary data)."
         ),
+        "canslm_lines": list(getattr(row, "canslm_lines", []) or []),
         "pattern_quality": row.pattern_quality,
         "rs_pct": row.rs_pct,
         "volume_ratio": row.volume_ratio,

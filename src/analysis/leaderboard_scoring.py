@@ -10,14 +10,16 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.analysis.canslim_core import (
+    CANSLM_RULE_COUNT,
+    CANSLIM_RULE_COUNT,
+    canslim_score_from_row,
+)
 from src.analysis.canslim_rulebook import (
     LeaderboardWeights,
     LeaderboardWeightsV2,
     get_rule_set,
 )
-
-CANSLIM_RULE_COUNT = 6
-CANSLIM_PASS_COLUMNS = ("Pass_C", "Pass_A", "Pass_N", "Pass_S", "Pass_L", "Pass_M")
 
 SCORE_VERSION_V1 = "v1"
 SCORE_VERSION_V2 = "v2"
@@ -66,13 +68,13 @@ class TickerFeatures:
     debt_to_equity: float | None = None
     peg_ratio: float | None = None
     trailing_pe: float | None = None
-    inst_ownership: float | None = None
     vol_annual_pct: float | None = None
     regime_align: float = 0.5
     has_eps_data: bool = False
     has_news: bool = False
     history_bars: int = 0
     catalyst_tags: list[str] = field(default_factory=list)
+    canslm_lines: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -101,12 +103,6 @@ class ScoredTicker:
         return json.dumps([c.to_dict() for c in self.components], separators=(",", ":"))
 
 
-def canslim_score_from_row(row: pd.Series) -> int:
-    return sum(
-        1 for c in CANSLIM_PASS_COLUMNS if c in row.index and bool(row[c])
-    )
-
-
 def compute_v1_composite(
     *,
     canslim_n: int,
@@ -117,7 +113,7 @@ def compute_v1_composite(
     weights: LeaderboardWeights | None = None,
 ) -> tuple[float, list[ScoreComponent]]:
     lw = weights or get_rule_set().leaderboard
-    canslim_norm = canslim_n / float(CANSLIM_RULE_COUNT)
+    canslim_norm = canslim_n / float(CANSLM_RULE_COUNT)
     vol_norm = min(1.0, vol_ratio / 2.0)
     rs_norm = max(0.0, min(1.0, (rs_pct + 20) / 60))
     components = [
@@ -347,7 +343,6 @@ def apply_universe_scoring(
                 "debt_to_equity": f.debt_to_equity,
                 "peg_ratio": f.peg_ratio,
                 "trailing_pe": f.trailing_pe,
-                "inst_ownership": f.inst_ownership,
                 "vol_annual_pct": f.vol_annual_pct,
                 "regime_align": f.regime_align,
                 "features": f,

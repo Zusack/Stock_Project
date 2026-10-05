@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 import pandas as pd
@@ -21,20 +21,17 @@ from src.analysis.bulk_loaders import (
     load_profile_map,
     prepare_market_frame,
 )
+from src.analysis.db import db_connection, list_tickers
 
 MIN_PARALLEL_UNIVERSE = 15
-from src.analysis.canslim_signals import build_canslim_frame
-from src.analysis.db import db_connection, list_tickers, load_ohlcv
-from src.analysis.db import load_price_data
+from src.analysis.canslim_core import CANSLM_RULE_COUNT, CANSLIM_RULE_COUNT
 from src.analysis.leaderboard_scoring import (
-    CANSLIM_RULE_COUNT,
     DEFAULT_SCORE_VERSION,
     TickerFeatures,
-    annualized_volatility_pct,
     apply_universe_scoring,
-    canslim_score_from_row,
 )
-from src.analysis.market_context import load_latest_market_context, regime_alignment_score
+from src.analysis.market_context import load_latest_market_context
+from src.analysis.ticker_evaluation import evaluate_ticker_snapshot, score_ticker_with_cache
 from src.analysis.parallel_exec import default_worker_count, run_parallel_map
 from src.services.stock_config import stock_config
 
@@ -84,48 +81,7 @@ class LeaderboardRow:
     rating_risk: str = "C"
     data_confidence: float = 1.0
     score_components_json: str = ""
-
-
-def _canslim_score_from_row(row: pd.Series) -> int:
-    return canslim_score_from_row(row)
-
-
-def _join_market(
-    df: pd.DataFrame,
-    market_df: pd.DataFrame | None,
-) -> pd.DataFrame:
-    if market_df is not None and not market_df.empty:
-        mkt = market_df.copy()
-        if "SMA50" not in mkt.columns:
-            mkt["SMA50"] = mkt["Adj Close"].rolling(50).mean()
-        if "Uptrend" not in mkt.columns:
-            mkt["Uptrend"] = mkt["Adj Close"] > mkt["SMA50"]
-        joined = df.join(
-            mkt[["Adj Close", "Uptrend"]].rename(columns={"Adj Close": "Adj Close_Mkt"}),
-            how="inner",
-        )
-    else:
-        joined = df.copy()
-        joined["Adj Close_Mkt"] = joined["Adj Close"]
-        joined["Uptrend"] = True
-    if joined.index.has_duplicates:
-        joined = joined[~joined.index.duplicated(keep="last")]
-    return joined
-
-
-def _profile_metrics(
-    prof: dict | None,
-    fund_prof: dict[str, float | None] | None,
-) -> dict[str, float | None]:
-    fund_prof = fund_prof or {}
-    return {
-        "roe": fund_prof.get("ROE"),
-        "profit_margins": fund_prof.get("Profit_Margins"),
-        "debt_to_equity": fund_prof.get("Debt_to_Equity"),
-        "peg_ratio": fund_prof.get("PEG_Ratio"),
-        "trailing_pe": fund_prof.get("Trailing_PE"),
-        "inst_ownership": fund_prof.get("Inst_Ownership"),
-    }
+    canslm_lines: list[str] = field(default_factory=list)
 
 
 def extract_ticker_features(
@@ -145,151 +101,23 @@ def extract_ticker_features(
     market_regime: str = "neutral",
 ) -> TickerFeatures | None:
     """Compute raw per-ticker features before universe normalization."""
-    if price_df is not None:
-        df = price_df
-    else:
-        df = load_price_data(ticker, db_path, 'Date, "Adj Close", Volume')
-    if market_df is None:
-        market_df = load_price_data(market_ticker, db_path)
-    if ohlcv is None:
-        ohlcv = load_ohlcv(ticker, db_path)
-
-    if df is None or len(df) < 60:
-        return None
-
-    joined = _join_market(df, market_df)
-    if joined.empty:
-        return None
-
-    if q_df is None:
-        q_df = pd.DataFrame()
-    if a_df is None:
-        a_df = pd.DataFrame()
-    if sector is None:
-        sector = ""
-    if industry is None:
-        industry = ""
-
-    has_eps = not q_df.empty or not a_df.empty
-    if not has_eps:
-        try:
-            with db_connection(db_path, readonly=True) as conn:
-                q_df = pd.read_sql(
-                    """
-                    SELECT Report_Date, Value FROM fundamentals
-                    WHERE Ticker = ? AND Metric = 'Basic EPS' AND Period_Type = 'Quarterly'
-                    ORDER BY Report_Date ASC
-                    """,
-                    conn,
-                    params=(ticker,),
-                )
-                a_df = pd.read_sql(
-                    """
-                    SELECT Report_Date, Value FROM fundamentals
-                    WHERE Ticker = ? AND Metric = 'Basic EPS' AND Period_Type = 'Annual'
-                    ORDER BY Report_Date ASC
-                    """,
-                    conn,
-                    params=(ticker,),
-                )
-                has_eps = not q_df.empty or not a_df.empty
-                if not sector or not industry:
-                    prof = conn.execute(
-                        "SELECT Sector, Industry FROM stock_profiles WHERE Ticker = ?",
-                        (ticker,),
-                    ).fetchone()
-                    if prof:
-                        if not sector and prof[0]:
-                            sector = prof[0]
-                        if not industry and len(prof) > 1 and prof[1]:
-                            industry = prof[1]
-        except sqlite3.Error:
-            pass
-
-    ohlcv_use = ohlcv.reindex(joined.index) if ohlcv is not None else joined
-    frame, _meta = build_canslim_frame(joined, q_df, a_df, ohlcv=ohlcv_use)
-    last = frame.iloc[-1]
-
-    canslim_n = _canslim_score_from_row(last)
-    pattern_q = float(last.get("Pattern_Quality", 0) or 0)
-    high_52 = float(last.get("High_52", 0) or 0)
-    price = float(last["Adj Close"])
-    near_high = (price / high_52) if high_52 > 0 else 0.0
-    vol_sma = float(last.get("Vol_SMA50", 0) or 1)
-    vol_ratio = float(last["Volume"]) / vol_sma if vol_sma > 0 else 0.0
-    stock_ret = float(last.get("Stock_Ret_6m", 0) or 0)
-    mkt_ret = float(last.get("Mkt_Ret_6m", 0) or 0)
-    rs_pct = (stock_ret - mkt_ret) * 100 if not pd.isna(stock_ret) else 0.0
-
-    setup = bool(last.get("Setup_Good", False))
-    pattern = bool(last.get("Pass_Pattern", False))
-    sma50 = float(last.get("SMA50", 0) or 0)
-    risk = ""
-    if price < sma50 and sma50 > 0:
-        risk = "Below 50-day simple moving average"
-    elif not bool(last.get("Pass_M", True)):
-        risk = "Market weak"
-    elif near_high < 0.75:
-        risk = "Extended below highs"
-
-    news_norm = 0.5
-    news_confidence = 0.5
-    news_tags: list[str] = []
-    catalyst_tags: list[str] = []
-    has_news = False
-    try:
-        from src.analysis.news_signals import score_headlines_list
-
-        if headlines is not None:
-            news_norm, news_tags, news_confidence, catalyst_tags = score_headlines_list(
-                headlines, ticker, max_headlines=3
-            )
-            has_news = bool(headlines)
-        else:
-            from src.analysis.news_signals import score_ticker_news
-
-            news_norm, news_tags, news_confidence, catalyst_tags = score_ticker_news(
-                db_path, ticker, max_headlines=3
-            )
-            has_news = news_norm != 0.5 or bool(news_tags)
-    except Exception:
-        pass
-
-    metrics = _profile_metrics(None, fund_profile)
-    vol_ann = annualized_volatility_pct(ohlcv if ohlcv is not None else joined)
-    regime_align = regime_alignment_score(
-        market_regime, pass_setup=setup, risk_flag=risk
+    snap = evaluate_ticker_snapshot(
+        ticker,
+        db_path,
+        market_ticker,
+        market_df=market_df,
+        ohlcv=ohlcv,
+        q_df=q_df,
+        a_df=a_df,
+        sector=sector,
+        industry=industry,
+        price_df=price_df,
+        headlines=headlines,
+        fund_profile=fund_profile,
+        market_regime=market_regime,
+        apply_scores=False,
     )
-
-    return TickerFeatures(
-        ticker=ticker,
-        canslim_n=canslim_n,
-        pattern_q=pattern_q,
-        rs_pct=rs_pct,
-        vol_ratio=vol_ratio,
-        near_high=near_high,
-        news_norm=news_norm,
-        news_confidence=news_confidence,
-        news_tags=news_tags,
-        catalyst_tags=catalyst_tags,
-        pass_setup=setup,
-        pass_pattern=pattern,
-        risk_flag=risk,
-        price=price,
-        sector=sector or "",
-        industry=industry or "",
-        roe=metrics["roe"],
-        profit_margins=metrics["profit_margins"],
-        debt_to_equity=metrics["debt_to_equity"],
-        peg_ratio=metrics["peg_ratio"],
-        trailing_pe=metrics["trailing_pe"],
-        inst_ownership=metrics["inst_ownership"],
-        vol_annual_pct=vol_ann,
-        regime_align=regime_align,
-        has_eps_data=has_eps,
-        has_news=has_news,
-        history_bars=len(df),
-    )
+    return snap.features if snap is not None else None
 
 
 def _scored_to_row(scored) -> LeaderboardRow:
@@ -329,6 +157,7 @@ def _scored_to_row(scored) -> LeaderboardRow:
         rating_risk=scored.rating_risk,
         data_confidence=scored.data_confidence,
         score_components_json=scored.components_json(),
+        canslm_lines=list(f.canslm_lines),
     )
 
 
@@ -350,8 +179,7 @@ def score_ticker(
     score_version: str | None = None,
 ) -> LeaderboardRow | None:
     """Compute leaderboard metrics for one symbol (single-ticker path)."""
-    version = score_version or stock_config().leaderboard_score_version
-    features = extract_ticker_features(
+    return score_ticker_with_cache(
         ticker,
         db_path,
         market_ticker,
@@ -365,13 +193,8 @@ def score_ticker(
         headlines=headlines,
         fund_profile=fund_profile,
         market_regime=market_regime,
+        score_version=score_version,
     )
-    if features is None:
-        return None
-    scored_list = apply_universe_scoring([features], score_version=version, market_regime=market_regime)
-    if not scored_list:
-        return None
-    return _scored_to_row(scored_list[0])
 
 
 def _init_leaderboard_worker(ctx: dict) -> None:
@@ -416,6 +239,48 @@ def _extract_features_worker(ticker: str) -> TickerFeatures | None:
     )
 
 
+def fill_unscored_watchlist_gaps(
+    df: pd.DataFrame | None,
+    tickers: list[str] | None,
+) -> pd.DataFrame:
+    """Append placeholder rows for watchlist symbols that could not be scored."""
+    if not tickers:
+        return df.copy() if df is not None and not df.empty else pd.DataFrame()
+    base = df.copy() if df is not None and not df.empty else pd.DataFrame()
+    scored = (
+        set(base["ticker"].astype(str).str.upper())
+        if not base.empty and "ticker" in base.columns
+        else set()
+    )
+    missing = [str(t).strip().upper() for t in tickers if str(t).strip().upper() not in scored]
+    if not missing:
+        return base
+    placeholders = [
+        {
+            "ticker": sym,
+            "composite_score": 0.0,
+            "canslim_score": 0,
+            "pattern_quality": 0.0,
+            "rs_pct": 0.0,
+            "volume_ratio": 0.0,
+            "near_high_pct": 0.0,
+            "pass_setup": False,
+            "pass_pattern": False,
+            "risk_flag": "No price data — ingest on Research Universe tab",
+            "latest_price": 0.0,
+            "sector": "",
+            "industry": "",
+            "notes": "Not scored",
+            "data_confidence": 0.0,
+        }
+        for sym in missing
+    ]
+    extra = pd.DataFrame(placeholders)
+    if base.empty:
+        return extra
+    return pd.concat([base, extra], ignore_index=True)
+
+
 def filter_leaderboard_segment(
     df: pd.DataFrame,
     segment: LeaderboardSegment,
@@ -448,18 +313,11 @@ def filter_leaderboard_segment(
         out = out[out["sell_pressure"].fillna(0) > 0].sort_values(sort_col, ascending=False)
     elif segment == LeaderboardSegment.WATCHLIST:
         try:
-            with db_connection(db_path, readonly=True) as conn:
-                wl = {
-                    r[0]
-                    for r in conn.execute(
-                        """
-                        SELECT symbol FROM watchlist_tickers
-                        WHERE skip_ingest = 0 AND pool = 'focus'
-                        """
-                    ).fetchall()
-                }
+            from src.analysis.watchlist_schema import resolve_watchlist_symbols
+
+            wl = {s.upper() for s in resolve_watchlist_symbols(db_path)}
             out = out[out["ticker"].isin(wl)].sort_values("composite_score", ascending=False)
-        except sqlite3.Error:
+        except Exception:
             out = out.sort_values("composite_score", ascending=False)
     else:
         out = out.sort_values("composite_score", ascending=False)
@@ -646,7 +504,7 @@ def rows_to_display_df(df: pd.DataFrame) -> pd.DataFrame:
     rename = {
         "ticker": "Ticker",
         "composite_score": "Composite",
-        "canslim_score": "CANSLIM",
+        "canslim_score": "CANSLM",
         "industry": "Industry",
         "pattern_quality": "Pattern",
         "rs_pct": "RS%",
@@ -667,9 +525,9 @@ def rows_to_display_df(df: pd.DataFrame) -> pd.DataFrame:
     }
     cols = [c for c in rename if c in out.columns]
     out = out[cols].rename(columns={k: rename[k] for k in cols})
-    if "CANSLIM" in out.columns:
-        out["CANSLIM"] = out["CANSLIM"].map(
-            lambda v: f"{int(v)}/{CANSLIM_RULE_COUNT}" if pd.notna(v) else "—"
+    if "CANSLM" in out.columns:
+        out["CANSLM"] = out["CANSLM"].map(
+            lambda v: f"{int(v)}/{CANSLM_RULE_COUNT}" if pd.notna(v) else "—"
         )
     if "Setup" in out.columns:
         out["Setup"] = out["Setup"].map(lambda v: "Yes" if v else "No")

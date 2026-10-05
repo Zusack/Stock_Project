@@ -159,7 +159,7 @@ def test_rows_to_display_canslim_six():
         ]
     )
     out = rows_to_display_df(df)
-    assert out.iloc[0]["CANSLIM"] == "6/6"
+    assert out.iloc[0]["CANSLM"] == "6/6"
 
 
 def test_filter_buy_ready_segment():

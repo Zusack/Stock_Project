@@ -14,7 +14,7 @@ import pandas as pd
 from src.analysis.db import db_connection, ingest_write_lock
 from src.analysis.intelligence_schema import ensure_intelligence_schema
 from src.analysis.leaderboard import LeaderboardRow, build_leaderboard, score_ticker
-from src.analysis.leaderboard_scoring import CANSLIM_RULE_COUNT
+from src.analysis.canslim_core import CANSLM_RULE_COUNT, CANSLIM_RULE_COUNT
 from src.analysis.market_context import (
     build_market_context,
     load_latest_market_context,
@@ -107,10 +107,10 @@ def _build_confidence(
     news_sent: float,
     regime_align: float,
     canslim_score: int,
-    canslim_max: int = CANSLIM_RULE_COUNT,
+    canslim_max: int = CANSLM_RULE_COUNT,
 ) -> float:
     base = lb.composite_score / 100.0
-    denom = float(canslim_max) if canslim_max > 0 else float(CANSLIM_RULE_COUNT)
+    denom = float(canslim_max) if canslim_max > 0 else float(CANSLM_RULE_COUNT)
     canslim_boost = canslim_score / denom * 0.15
     news_adj = (news_sent - 0.5) * 0.1
     regime_adj = (regime_align - 0.5) * 0.12
@@ -128,12 +128,12 @@ def _drivers(
     regime_align: float,
     market_regime: str,
     canslim_score: int,
-    canslim_max: int = CANSLIM_RULE_COUNT,
+    canslim_max: int = CANSLM_RULE_COUNT,
 ) -> tuple[list[str], list[str], str]:
     pos: list[str] = []
     neg: list[str] = []
     if lb.pass_setup:
-        pos.append("CANSLIM setup passes")
+        pos.append("CANSLM setup passes")
     if lb.pass_pattern:
         pos.append("Cup-with-handle pattern")
     if lb.rs_pct > 5:
@@ -148,7 +148,7 @@ def _drivers(
     if lb.risk_flag:
         neg.append(lb.risk_flag)
     if canslim_score < 4:
-        neg.append(f"Low CANSLIM score ({canslim_score}/{canslim_max})")
+        neg.append(f"Low CANSLM score ({canslim_score}/{canslim_max})")
     if news_sent < 0.4:
         neg.append("Negative news tone")
     if lb.near_high_pct < 75 and lb.pass_setup:
@@ -174,11 +174,11 @@ def score_guidance_row(
 ) -> GuidanceRow:
     """Score guidance for a leaderboard row.
 
-    Optional ``canslim_score`` / ``canslim_max`` override the leaderboard's
-    6-factor count (e.g. Stock Detail interactive analysis uses 7 letters).
+    Optional ``canslim_score`` / ``canslim_max`` override the leaderboard row when
+    Stock Detail has a fresher evaluation (same 6-letter CANSLM rules).
     """
     score = lb.canslim_score if canslim_score is None else int(canslim_score)
-    max_score = CANSLIM_RULE_COUNT if canslim_max is None else int(canslim_max)
+    max_score = CANSLM_RULE_COUNT if canslim_max is None else int(canslim_max)
     if lb.news_tags is not None:
         news_sent = float(lb.news_sentiment)
         news_tags = list(lb.news_tags)

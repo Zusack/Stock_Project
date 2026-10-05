@@ -34,6 +34,7 @@ def load_fundamentals_profile_map(db_path: str) -> dict[str, dict[str, float | N
     """Ticker -> valuation/quality fields from stock_profiles."""
     cols = (
         "Ticker",
+        # Inst_Ownership: ingested for Fundamentals display only, not CANSLIM scoring.
         "Inst_Ownership",
         "Trailing_PE",
         "PEG_Ratio",
@@ -134,4 +135,10 @@ def load_history_grouped(
 
 
 def prepare_market_frame(db_path: str, market_ticker: str) -> pd.DataFrame | None:
-    return load_market_data(db_path, market_ticker)
+    from src.analysis.canslim_core import enrich_market_frame
+    from src.analysis.db import load_market_data
+
+    raw = load_market_data(db_path, market_ticker)
+    if raw is None or raw.empty:
+        return raw
+    return enrich_market_frame(raw)

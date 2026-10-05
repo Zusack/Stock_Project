@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.analysis.canslim_core import price_vs_sma50
 from src.analysis.db import db_connection, ingest_write_lock, load_price_data, load_prices_bulk
 from src.analysis.intelligence_schema import ensure_intelligence_schema
 from src.analysis.market_calendar import last_completed_trading_day
@@ -65,12 +66,13 @@ class MarketContextSnapshot:
 def _trend_score_from_prices(df: pd.DataFrame, *, sma_days: int = 50) -> float:
     if df is None or len(df) < sma_days + 5:
         return 0.5
-    close = df["Adj Close"].astype(float)
-    sma = close.rolling(sma_days).mean()
-    last = float(close.iloc[-1])
-    sma_last = float(sma.iloc[-1])
+    values = price_vs_sma50(df, window=sma_days)
+    if values is None:
+        return 0.5
+    last, sma_last = values
     if sma_last <= 0:
         return 0.5
+    close = df["Adj Close"].astype(float).ffill()
     dist = (last / sma_last) - 1.0
     ret_3m = float(close.iloc[-1] / close.iloc[-min(63, len(close) - 1)] - 1) if len(close) > 63 else 0.0
     score = 0.5 + min(0.25, max(-0.25, dist * 2)) + min(0.15, max(-0.15, ret_3m))
@@ -99,8 +101,8 @@ def _compute_breadth(db_path: str, *, lookback_days: int = 126, max_symbols: int
         df = bulk.get(sym)
         if df is None or len(df) < 55:
             continue
-        close = df["Adj Close"].astype(float)
-        sma50 = close.rolling(50).mean().iloc[-1]
+        close = df["Adj Close"].astype(float).ffill()
+        sma50 = close.rolling(50, min_periods=50).mean().iloc[-1]
         if pd.isna(sma50):
             continue
         total += 1

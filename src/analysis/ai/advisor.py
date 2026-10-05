@@ -14,6 +14,17 @@ if TYPE_CHECKING:
     from src.analysis.guidance import GuidanceRow
     from src.analysis.leaderboard import LeaderboardRow
 
+# In-memory session cache so tab switches do not re-run local LLM calls.
+_SESSION_INSIGHTS: dict[tuple[str, str], list["SignalSuggestion"]] = {}
+
+
+def _cache_session_insights(
+    session_key: tuple[str, str],
+    suggestions: list[SignalSuggestion],
+) -> list[SignalSuggestion]:
+    _SESSION_INSIGHTS[session_key] = list(suggestions)
+    return suggestions
+
 
 @dataclass
 class SignalSuggestion:
@@ -53,18 +64,19 @@ def resolve_advisor_rows(
     """Load leaderboard/guidance rows when callers pass ticker only.
 
     Optional ``canslim_score`` / ``canslim_max`` align guidance text with an
-    interactive CANSLIM analysis (7 letters) instead of the leaderboard's 6.
+    interactive CANSLM analysis (same 6 letters as the Leaderboard).
     """
     from src.analysis.ai.context import load_guidance_for_ticker
     from src.analysis.guidance import score_guidance_row
-    from src.analysis.leaderboard import score_ticker
+    from src.analysis.guidance import score_guidance_row
+    from src.analysis.ticker_evaluation import score_ticker_with_cache
 
     cfg = stock_config()
     db = db_path or cfg.db_path
     sym = str(ticker).strip().upper()
 
     if leaderboard_row is None:
-        leaderboard_row = score_ticker(sym, db, cfg.market_ticker)
+        leaderboard_row = score_ticker_with_cache(sym, db, cfg.market_ticker)
     if guidance_row is None and leaderboard_row is not None:
         guidance_row = score_guidance_row(
             leaderboard_row,
@@ -153,7 +165,7 @@ class RuleBasedSignalAdvisor(SignalAdvisor):
                     SignalSuggestion(
                         ticker=sym,
                         headline="Setup + pattern aligned",
-                        detail="CANSLIM setup and cup-with-handle pattern both pass.",
+                        detail="CANSLM setup and cup-with-handle pattern both pass.",
                         severity="watch",
                         provider="rule_based",
                     )
@@ -192,6 +204,11 @@ class LMStudioSignalAdvisor(SignalAdvisor):
         sym = str(ticker).strip().upper()
         cfg = stock_config()
         db = db_path or cfg.db_path
+        session_key = (sym, db)
+        cached_session = _SESSION_INSIGHTS.get(session_key)
+        if cached_session is not None:
+            return list(cached_session)
+
         leaderboard_row, guidance_row = resolve_advisor_rows(
             sym,
             leaderboard_row=leaderboard_row,
@@ -214,14 +231,45 @@ class LMStudioSignalAdvisor(SignalAdvisor):
             return base
 
         if not cfg.lm_studio_enabled:
-            return base
+            return _cache_session_insights(session_key, base)
 
         try:
             from src.analysis.ai.context import assemble_ticker_context
             from src.analysis.ai.narrative import parse_narrative_json
-            from src.analysis.intelligence_schema import save_ai_insight
+            from src.analysis.intelligence_schema import load_latest_ai_insight, save_ai_insight
             from src.llm.manager import llm_manager
             from src.utils.logger_utils import app_logger
+
+            context = assemble_ticker_context(
+                sym,
+                db,
+                canslim_score=canslim_score,
+                canslim_max=canslim_max,
+            )
+            ctx_hash = context.get("context_hash", "")
+            cached = load_latest_ai_insight(db, sym, kind="ticker_narrative")
+            if cached and cached.get("source_context_hash") == ctx_hash:
+                sugg_data = (cached.get("payload") or {}).get("suggestion")
+                if sugg_data:
+                    suggestion = SignalSuggestion(
+                        ticker=str(sugg_data.get("ticker", sym)),
+                        headline=str(sugg_data.get("headline", "")),
+                        detail=str(sugg_data.get("detail", "")),
+                        severity=str(sugg_data.get("severity", "info")),
+                        band=str(sugg_data.get("band", "")),
+                        drivers=[str(d) for d in (sugg_data.get("drivers") or [])],
+                        provider=str(sugg_data.get("provider", "llm_sdk")),
+                    )
+                    app_logger.log(
+                        "ADVISOR",
+                        f"AI insight cache hit for {sym}.",
+                        level="INFO",
+                        ticker=sym,
+                        context_hash=ctx_hash,
+                    )
+                    if base and base[0].headline != "No guidance data":
+                        return _cache_session_insights(session_key, [suggestion] + base[1:])
+                    return _cache_session_insights(session_key, [suggestion] + base)
 
             mgr = llm_manager()
             ok, model_or_err = mgr.ensure_model_loaded()
@@ -239,15 +287,9 @@ class LMStudioSignalAdvisor(SignalAdvisor):
                     severity="info",
                     provider="llm_sdk",
                 )
-                return [hint] + base
+                return _cache_session_insights(session_key, [hint] + base)
 
             model_id = model_or_err
-            context = assemble_ticker_context(
-                sym,
-                db,
-                canslim_score=canslim_score,
-                canslim_max=canslim_max,
-            )
             prompt = (
                 f"You are a stock research assistant. Analyze ticker {sym} using the JSON context below.\n"
                 "Reply with JSON only (no markdown fences):\n"
@@ -302,8 +344,8 @@ class LMStudioSignalAdvisor(SignalAdvisor):
                 model=model_id,
             )
             if base and base[0].headline != "No guidance data":
-                return [suggestion] + base[1:]
-            return [suggestion] + base
+                return _cache_session_insights(session_key, [suggestion] + base[1:])
+            return _cache_session_insights(session_key, [suggestion] + base)
         except Exception as ex:
             from src.utils.logger_utils import app_logger
 
@@ -320,7 +362,7 @@ class LMStudioSignalAdvisor(SignalAdvisor):
                 severity="info",
                 provider="llm_sdk",
             )
-            return [hint] + base
+            return _cache_session_insights(session_key, [hint] + base)
 
 
 def _parse_narrative_json(text: str) -> dict | None:

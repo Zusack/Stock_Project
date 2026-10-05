@@ -1,221 +1,194 @@
-"""Per-strategy backtest runners (extracted from StrategyBacktestView)."""
+"""Unified backtest runners for Strategy Backtests tab."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable
+from dataclasses import dataclass, field
+from typing import Callable
 
-import pandas as pd
-
-from src.analysis.canslim_backtest import run_canslim_backtest
-from src.analysis.db import resolve_market_ticker
-from src.analysis.general import evaluate_general_rules
-from src.analysis.hybrid import run_hybrid_analysis
-from src.analysis.technical import run_technical_analysis
+from src.analysis.backtest_engine import BacktestCancelled, BacktestResult, run_backtest
+from src.analysis.backtest_schema import save_backtest_run
+from src.analysis.canslim_adapter import run_canslim_backtest_unified
+from src.analysis.db import load_market_data, resolve_market_ticker
+from src.analysis.strategy_spec import StrategySpec, validate_spec
 from src.services.stock_config import stock_config
-from src.utils.format_utils import format_percent
-
-
-@dataclass
-class StrategyRunOutcome:
-    summary: str
-    df: pd.DataFrame | None = None
-    trades_df: pd.DataFrame | None = None
-    chart_series: dict | None = None
-    portfolio_dates: list[str] | None = None
-    portfolio_values: list[float] | None = None
-
 
 ProgressFn = Callable[[str, float | None, bool], None]
 
 
-def run_general_strategy(
+@dataclass
+class CompareRunResult:
+    results: list[BacktestResult] = field(default_factory=list)
+    summary: str = ""
+    cancelled: bool = False
+
+
+def run_strategy_backtest(
+    spec: StrategySpec,
     *,
     db_path: str,
     tickers: list[str] | None,
     lookback_days: int,
     initial_capital: float,
-    use_parallel: bool,
-    progress: ProgressFn,
-) -> StrategyRunOutcome:
-    progress("Step 1/2: Loading database and evaluating general rules per ticker…", None, True)
-    res = evaluate_general_rules(
-        db_path,
-        tickers=tickers,
-        lookback_days=lookback_days,
-        initial_capital=initial_capital,
-        use_parallel=use_parallel,
-        progress_callback=lambda p, *_: progress(f"Step 1/2: {int(p * 100)}% complete", p, True),
-    )
-    progress("Step 2/2: Aggregating strategy averages…", 1.0, True)
-    if res is None:
-        return StrategyRunOutcome(summary="No data in database.")
-    avgs = ", ".join(f"{k}: {v:.2f}x" for k, v in res.strategy_averages.items())
-    chart_note = f" Chart: {res.best_strategy} signals." if res.chart_series else ""
-    summary = (
-        f"Period: {res.period_label} ({lookback_days}d). "
-        f"Start ${initial_capital:.2f}. "
-        f"Stocks: {res.stock_count}. Winner: {res.winner}. {avgs}.{chart_note}"
-    )
-    stock_config().set_last_analysis_label("General rules backtest")
-    return StrategyRunOutcome(
-        summary=summary,
-        df=res.per_ticker,
-        chart_series=res.chart_series or None,
-        portfolio_dates=res.combined_portfolio_dates,
-        portfolio_values=res.combined_portfolio_values,
-    )
+    benchmark_ticker: str | None = None,
+    use_parallel: bool = True,
+    progress: ProgressFn | None = None,
+    cancel_event=None,
+    save_run: bool = True,
+) -> BacktestResult | None:
+    """Dispatch to unified or CANSLIM engine based on spec.engine."""
+    errors = validate_spec(spec)
+    if errors:
+        raise ValueError("; ".join(errors))
 
-
-def run_hybrid_strategy(
-    *,
-    db_path: str,
-    tickers: list[str] | None,
-    lookback_days: int,
-    initial_capital: float,
-    use_parallel: bool,
-    market_trend_weeks: int,
-    progress: ProgressFn,
-) -> StrategyRunOutcome:
     cfg = stock_config()
-    market = resolve_market_ticker(db_path, cfg.market_ticker)
-    progress(
-        f"Step 1/2: Loading database and running hybrid analysis (market: {market})…",
-        None,
-        True,
-    )
-    res = run_hybrid_analysis(
-        db_path,
-        market,
-        market_trend_weeks=market_trend_weeks,
-        tickers=tickers,
-        lookback_days=lookback_days,
-        initial_capital=initial_capital,
-        use_parallel=use_parallel,
-        progress_callback=lambda p, *_: progress(f"Step 1/2: {int(p * 100)}% complete", p, True),
-    )
-    progress("Step 2/2: Computing win rate and averages…", 1.0, True)
-    if res is None:
-        return StrategyRunOutcome(summary="No data or market ticker missing.")
-    summary = (
-        f"Period: {res.period_label} ({lookback_days}d). "
-        f"Start ${initial_capital:.2f}. "
-        f"Market: {res.market_ticker}. Stocks: {res.stock_count}. "
-        f"Win rate {format_percent(res.win_rate, decimals=1)}. "
-        f"Avg standalone: {res.avg_standalone:.2f}x, hybrid: {res.avg_hybrid:.2f}x. "
-        "Markers: hybrid signal on/off."
-    )
-    stock_config().set_last_analysis_label("Hybrid backtest")
-    return StrategyRunOutcome(
-        summary=summary,
-        df=res.results_df,
-        chart_series=res.chart_series or None,
-        portfolio_dates=res.combined_portfolio_dates,
-        portfolio_values=res.combined_portfolio_values,
-    )
+    bench = benchmark_ticker or spec.market_ticker or cfg.market_ticker
+
+    def _prog(p: float) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise BacktestCancelled("Cancelled by user.")
+        if progress:
+            progress(f"Running backtest… {int(p * 100)}%", p, True)
+
+    if spec.engine == "canslim":
+        result = run_canslim_backtest_unified(
+            spec,
+            db_path=db_path,
+            tickers=tickers,
+            lookback_days=lookback_days,
+            initial_capital=initial_capital,
+            use_parallel=use_parallel,
+            progress_callback=_prog,
+            cancel_event=cancel_event,
+        )
+    else:
+        result = run_backtest(
+            spec,
+            db_path=db_path,
+            tickers=tickers,
+            lookback_days=lookback_days,
+            initial_capital=initial_capital,
+            benchmark_ticker=bench,
+            progress_callback=_prog,
+            cancel_event=cancel_event,
+        )
+
+    if cancel_event is not None and cancel_event.is_set():
+        raise BacktestCancelled("Cancelled by user.")
+
+    if result is None:
+        return None
+
+    if save_run:
+        try:
+            save_backtest_run(
+                db_path,
+                spec=spec,
+                metrics=result.metrics.to_dict(),
+                tickers=result.tickers_run,
+                lookback_days=lookback_days,
+                initial_capital=initial_capital,
+            )
+        except Exception:
+            pass
+
+    stock_config().set_last_analysis_label(f"Backtest: {spec.name}")
+    return result
 
 
-def run_technical_strategy(
+def run_compare_backtests(
+    specs: list[StrategySpec],
     *,
     db_path: str,
     tickers: list[str] | None,
     lookback_days: int,
     initial_capital: float,
-    use_parallel: bool,
-    progress: ProgressFn,
-) -> StrategyRunOutcome:
-    progress("Step 1/2: Loading database and running MACD / Bollinger per ticker…", None, True)
-    res = run_technical_analysis(
-        db_path,
-        tickers=tickers,
-        lookback_days=lookback_days,
-        initial_capital=initial_capital,
-        use_parallel=use_parallel,
-        save_to_db=False,
-        progress_callback=lambda p, *_: progress(f"Step 1/2: {int(p * 100)}% complete", p, True),
-    )
-    progress("Step 2/2: Ranking results by alpha…", 1.0, True)
-    if res is None:
-        return StrategyRunOutcome(summary="No data.")
-    summary = (
-        f"Period: {res.period_label} ({lookback_days}d). "
-        f"Start ${initial_capital:.2f}. "
-        f"Stocks: {res.stock_count}. "
-        f"Avg baseline {res.avg_baseline:.2f}x, "
-        f"MACD {res.avg_macd:.2f}x, Bollinger {res.avg_bollinger:.2f}x. "
-        "Markers: MACD crossovers and Bollinger trades."
-    )
-    stock_config().set_last_analysis_label("Technical backtest")
-    return StrategyRunOutcome(
-        summary=summary,
-        df=res.results_df.sort_values(by="Alpha", ascending=False),
-        chart_series=res.chart_series or None,
-        portfolio_dates=res.combined_portfolio_dates,
-        portfolio_values=res.combined_portfolio_values,
+    benchmark_ticker: str | None = None,
+    use_parallel: bool = True,
+    progress: ProgressFn | None = None,
+    cancel_event=None,
+) -> CompareRunResult:
+    """Run multiple strategies on the same universe for side-by-side comparison."""
+    results: list[BacktestResult] = []
+    total = len(specs)
+    cancelled = False
+    for i, spec in enumerate(specs):
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
+            break
+
+        def _prog(p: float, _i=i, _name=spec.name) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise BacktestCancelled("Cancelled by user.")
+            if progress:
+                overall = (_i + p) / max(total, 1)
+                progress(
+                    f"Comparing strategies ({_i + 1}/{total}): {_name}… {int(p * 100)}%",
+                    overall,
+                    True,
+                )
+
+        try:
+            if spec.engine == "canslim":
+                res = run_canslim_backtest_unified(
+                    spec,
+                    db_path=db_path,
+                    tickers=tickers,
+                    lookback_days=lookback_days,
+                    initial_capital=initial_capital,
+                    use_parallel=use_parallel,
+                    progress_callback=_prog,
+                    cancel_event=cancel_event,
+                )
+            else:
+                res = run_backtest(
+                    spec,
+                    db_path=db_path,
+                    tickers=tickers,
+                    lookback_days=lookback_days,
+                    initial_capital=initial_capital,
+                    benchmark_ticker=benchmark_ticker,
+                    progress_callback=_prog,
+                    cancel_event=cancel_event,
+                )
+        except BacktestCancelled:
+            cancelled = True
+            break
+        if res is not None:
+            results.append(res)
+
+    if cancelled and not results:
+        raise BacktestCancelled("Cancelled by user.")
+
+    summary_parts = [
+        f"{r.spec.name}: {r.metrics.total_return_pct:.1f}% ({r.metrics.sharpe:.2f} Sharpe)"
+        for r in results
+    ]
+    return CompareRunResult(
+        results=results,
+        summary=" | ".join(summary_parts) if summary_parts else "No results.",
+        cancelled=cancelled,
     )
 
 
-def run_canslim_strategy(
-    *,
+def load_benchmark_curve(
     db_path: str,
-    tickers: list[str] | None,
+    benchmark_ticker: str,
     lookback_days: int,
     initial_capital: float,
-    use_parallel: bool,
-    stop_loss: float,
-    take_profit: float,
-    progress: ProgressFn,
-) -> StrategyRunOutcome:
-    cfg = stock_config()
-    progress(
-        f"Step 1/2: Loading market ({cfg.market_ticker}) and simulating CANSLIM trades…",
-        None,
-        True,
-    )
-    res = run_canslim_backtest(
-        db_path,
-        market_ticker=cfg.market_ticker,
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-        tickers=tickers,
-        lookback_days=lookback_days,
-        initial_capital=initial_capital,
-        use_parallel=use_parallel,
-        rule_set_version=cfg.canslim_rule_set_version,
-        require_pattern=cfg.canslim_require_pattern,
-        progress_callback=lambda p, *_: progress(f"Step 1/2: {int(p * 100)}% complete", p, True),
-    )
-    progress("Step 2/2: Computing trade statistics…", 1.0, True)
-    if res is None:
-        return StrategyRunOutcome(summary="No market data for backtest.")
-    if res.total_trades == 0:
-        summary = (
-            f"Period: {res.period_label} ({lookback_days}d). "
-            f"Start ${initial_capital:.2f}. No trades generated in this window."
-        )
-        return StrategyRunOutcome(
-            summary=summary,
-            chart_series=res.chart_series or None,
-            portfolio_dates=res.combined_portfolio_dates,
-            portfolio_values=res.combined_portfolio_values,
-        )
-    fund = res.fundamentals_note or ""
-    summary = (
-        f"Period: {res.period_label} ({lookback_days}d). "
-        f"Start ${initial_capital:.2f} (partial shares). "
-        f"Stop {stop_loss:.0%}, take profit {take_profit:.0%}. "
-        f"Trades: {res.total_trades}, win rate {format_percent(res.win_rate, decimals=1)}, "
-        f"avg return {format_percent(res.avg_return_pct, decimals=2)}. "
-        "Entry on breakout (setup + volume surge); exits: stop, "
-        "take profit, below 50-day simple moving average, or market downtrend. "
-        f"{fund}"
-    )
-    stock_config().set_last_analysis_label("CANSLIM backtest")
-    return StrategyRunOutcome(
-        summary=summary,
-        df=res.ticker_stats,
-        trades_df=res.trades_df,
-        chart_series=res.chart_series or None,
-        portfolio_dates=res.combined_portfolio_dates,
-        portfolio_values=res.combined_portfolio_values,
-    )
+) -> tuple[list[str], list[float]]:
+    """Load benchmark buy-and-hold curve for chart overlay."""
+    market = resolve_market_ticker(db_path, benchmark_ticker)
+    mdf = load_market_data(db_path, market)
+    if mdf is None or mdf.empty:
+        return [], []
+    from src.analysis.backtest_common import period_bounds
+
+    p_start, p_end = period_bounds(mdf, lookback_days)
+    sl = mdf.loc[p_start:p_end]
+    if sl.empty:
+        return [], []
+    closes = sl["Adj Close"].astype(float)
+    if closes.iloc[0] == 0:
+        return [], []
+    eq = (closes / closes.iloc[0]) * initial_capital
+    return [d.strftime("%Y-%m-%d") for d in sl.index], eq.tolist()

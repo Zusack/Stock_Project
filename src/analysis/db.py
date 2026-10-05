@@ -550,6 +550,8 @@ def load_entire_database(
 
     df["Date"] = pd.to_datetime(df["Date"])
     df.sort_values(["Ticker", "Date"], inplace=True)
+    # Ingest bugs can leave duplicate (Ticker, Date) rows; keep the last.
+    df = df.drop_duplicates(subset=["Ticker", "Date"], keep="last")
     df.set_index("Date", inplace=True)
     return df
 

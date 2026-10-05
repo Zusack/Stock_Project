@@ -7,9 +7,9 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from src.analysis.db import get_profile, load_ohlcv
-from src.analysis.leaderboard import score_ticker
 from src.analysis.market_context import load_latest_market_context
 from src.analysis.quote_snapshot import get_quote, quote_to_dict
+from src.analysis.ticker_evaluation import score_ticker_with_cache
 from src.services.stock_config import stock_config
 
 if TYPE_CHECKING:
@@ -47,7 +47,7 @@ def assemble_ticker_context(
     from src.analysis.guidance import score_guidance_row
     from src.analysis.news_signals import load_recent_headlines, score_ticker_news
 
-    lb_row = score_ticker(sym, db, mkt, market_regime=regime)
+    lb_row = score_ticker_with_cache(sym, db, mkt, market_regime=regime)
     guidance_row: GuidanceRow | None = None
     if lb_row is not None:
         guidance_row = score_guidance_row(
@@ -90,12 +90,13 @@ def assemble_ticker_context(
             "catalyst_tags": catalysts,
         },
         "canslim_note": (
-            f"CANSLIM score is out of {canslim_max} (interactive Stock Detail uses 7 "
-            "letters including Institutions; leaderboard rankings use 6: C,A,N,S,L,M)."
+            f"CANSLM score is out of {canslim_max} on letters C, A, N, S, L, M "
+            "(same rules as the Leaderboard). IBD institutional sponsorship (I) "
+            "is omitted — proprietary accumulation metrics are not available."
             if canslim_max is not None
             else (
-                "Leaderboard CANSLIM uses 6 pass columns (C,A,N,S,L,M); "
-                "interactive analyze_canslim scores 7 letters including Institutions (I)."
+                "Leaderboard and Stock Detail CANSLM use 6 letters: C, A, N, S, L, M. "
+                "IBD \"I\" (institutional sponsorship) is not scored."
             )
         ),
     }

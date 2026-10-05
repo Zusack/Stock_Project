@@ -1,102 +1,77 @@
-"""Strategy backtest metadata shown in the Strategy Backtests tab."""
+"""Strategy backtest metadata, tooltips, and user guidance."""
 
 from __future__ import annotations
 
+from src.analysis.strategy_presets import PRESET_CATALOG
+
 STRATEGY_INFO: dict[str, dict[str, str]] = {
-    "general": {
-        "title": "General Rules",
-        "summary": (
-            "Compares four rule-based return multipliers across your universe: "
-            "buy & hold, golden cross (50/200-day simple moving averages), "
-            "200-day trend, and RSI dip buying."
-        ),
-        "strengths": (
-            "Simple, transparent rules; useful for screening which style fits your "
-            "database; easy to explain to stakeholders."
-        ),
-        "weaknesses": (
-            "Lagging signals; no transaction costs or slippage; can overfit one historical "
-            "period; ignores fundamentals and position sizing."
-        ),
-        "tooltip": (
-            "Compare buy & hold, golden cross, 200-day trend, and RSI dip rules. "
-            "Best for quick style screening."
-        ),
-        "run_tooltip": (
-            "Run all four rule styles on your database and compare which approach "
-            "would have performed best over the selected period."
-        ),
-    },
-    "hybrid": {
-        "title": "Hybrid (market filter)",
-        "summary": (
-            "Runs a stock simple moving average trend strategy alone, then again only "
-            "when a market index (e.g. ^DJI) is also above its trend — measuring whether "
-            "a regime filter improves results."
-        ),
-        "strengths": (
-            "Widely used industry idea (trade with the market tide); may cut drawdowns "
-            "in bear markets; separates stock skill from macro timing."
-        ),
-        "weaknesses": (
-            "Whipsaws in sideways markets; misses fast rebounds; results depend heavily "
-            "on which index you use as the market proxy."
-        ),
-        "tooltip": (
-            "Stock trend vs trend + market filter. Tests if macro timing helps. "
-            "Sensitive to market proxy choice."
-        ),
-        "run_tooltip": (
-            "Backtest a stock simple moving average strategy with and without a market "
-            "uptrend filter to see if timing the broad market improves returns."
-        ),
-    },
-    "technical": {
-        "title": "Technical (MACD vs Bollinger)",
-        "summary": (
-            "For each ticker, backtests MACD crossover (trend) and Bollinger Band "
-            "mean-reversion, then ranks names by alpha vs buy & hold."
-        ),
-        "strengths": (
-            "Uses familiar institutional indicators; contrasts trend-following vs "
-            "mean-reversion; highlights tickers where technical rules beat passive hold."
-        ),
-        "weaknesses": (
-            "Parameter-sensitive; noisy in choppy ranges; no fundamentals; "
-            "past indicator edge may not persist out of sample."
-        ),
-        "tooltip": (
-            "MACD vs Bollinger per ticker, ranked by alpha. "
-            "Classic technicals — weak in sideways markets."
-        ),
-        "run_tooltip": (
-            "Simulate MACD trend-following and Bollinger mean-reversion per ticker, "
-            "then rank symbols by outperformance vs buy-and-hold."
-        ),
-    },
-    "canslim": {
-        "title": "CANSLIM backtest",
-        "summary": (
-            "Simulates William O'Neil–style growth entries: quarterly/annual EPS growth, "
-            "new highs, leadership vs market, volume surge, and market uptrend, with "
-            "configurable stop-loss and take-profit exits."
-        ),
-        "strengths": (
-            "Disciplined growth framework combining fundamentals and technical triggers; "
-            "explicit risk rules; aligns with widely taught CANSLIM methodology."
-        ),
-        "weaknesses": (
-            "Strongest in bull markets; earnings data can lag; rule thresholds are "
-            "simplified vs live CANSLIM; survivorship and delisting not fully modeled."
-        ),
-        "tooltip": (
-            "O'Neil-style growth rules with stop/take-profit simulation. "
-            "Bull-market friendly; earnings timing matters."
-        ),
-        "run_tooltip": (
-            "Simulate CANSLIM-style entries and rulebook exits (stop loss, take profit, "
-            "below 50-day simple moving average, market off) using your stored "
-            "fundamentals and prices."
-        ),
-    },
+    pid: {
+        "title": meta["title"],
+        "summary": meta["summary"],
+        "category": meta.get("category", ""),
+        "tooltip": meta["summary"],
+        "run_tooltip": f"Run the {meta['title']} preset on your selected tickers and period.",
+    }
+    for pid, meta in PRESET_CATALOG.items()
 }
+
+METRIC_TOOLTIPS: dict[str, str] = {
+    "total_return_pct": "Total percentage gain or loss over the backtest period. Does not annualize.",
+    "cagr_pct": "Compound Annual Growth Rate — average yearly return if compounded. Above 10% is strong for equities.",
+    "sharpe": "Risk-adjusted return (excess return per unit of volatility). Above 1.0 is generally good; below 0 means losing money per unit risk.",
+    "sortino": "Like Sharpe but only penalizes downside volatility. Higher is better.",
+    "max_drawdown_pct": "Largest peak-to-trough decline in portfolio value. Lower is better; above 25% is painful for most investors.",
+    "win_rate_pct": "Percentage of closed trades that were profitable. High win rate alone does not guarantee profitability.",
+    "profit_factor": "Gross profits divided by gross losses. Above 1.0 means net profitable; above 1.5 is solid.",
+    "exposure_pct": "Fraction of time the strategy held a position (was invested vs cash).",
+    "alpha_pct": "Excess return vs the benchmark index over the same period.",
+    "beta": "Sensitivity to benchmark moves. Beta near 1 moves with the market; below 1 is less volatile.",
+    "trade_count": "Number of round-trip trades executed in the simulation.",
+}
+
+CONTROL_TOOLTIPS: dict[str, str] = {
+    "period": "Calendar days ending at the latest date in your database (minimum 30).",
+    "capital": "Starting cash for the simulation; fractional shares are allowed.",
+    "tickers": "Limit to specific symbols, or leave empty to use the universe selector.",
+    "universe": "Symbol set when the ticker filter is empty.",
+    "benchmark": "Index used for alpha/beta and the benchmark equity overlay (e.g. ^GSPC).",
+    "costs": "Apply slippage, spread, and per-trade fees from Settings → Backtest defaults.",
+    "compare": "Run 2–5 strategies on the same tickers and period for side-by-side metrics.",
+}
+
+GUIDED_EMPTY_STATE = (
+    "Welcome to Strategy Backtests\n\n"
+    "1. Pick tickers (or choose a universe) in the sidebar.\n"
+    "2. Select a preset, build custom rules, or compare strategies.\n"
+    "3. Click Run Backtest to see metrics, charts, and trade log.\n\n"
+    "Tip: Enable Local AI in Settings for natural-language strategy drafting and results analysis."
+)
+
+RESULTS_HELP_TEXT = (
+    "How to read backtest results\n\n"
+    "Equity curve: Shows portfolio value over time. Compare the strategy line to buy-and-hold "
+    "and the benchmark to see if timing rules added value.\n\n"
+    "Drawdown: How far the portfolio fell from its prior peak. Deep or long drawdowns mean "
+    "the strategy would have been hard to stick with emotionally.\n\n"
+    "Sharpe & profit factor: Risk-adjusted quality measures. A strategy can have high returns "
+    "but poor Sharpe if volatility was extreme.\n\n"
+    "Monthly returns: Green months are gains, red are losses. Look for consistency vs a few "
+    "lucky months.\n\n"
+    "Important caveats: Backtests use historical data only. Survivorship bias, delisting, "
+    "earnings timing, and liquidity are simplified. Past performance does not guarantee "
+    "future results. Avoid overfitting by testing multiple periods and out-of-sample tickers."
+)
+
+MODE_TOOLTIPS = {
+    "presets": "Ready-made strategies (Golden Cross, RSI, MACD, etc.) with editable parameters.",
+    "builder": "Build custom entry/exit rules without code, or draft rules with AI.",
+    "compare": "Run multiple strategies side-by-side on the same universe.",
+}
+
+LLM_STRATEGY_SCHEMA_HINT = (
+    'Reply with JSON only matching StrategySpec: {"name":"...", "description":"...", '
+    '"entry":{"logic":"and|or","rules":[{"indicator":"RSI","params":{"period":14},'
+    '"comparator":"crosses_below","target":{"kind":"value","value":30}}]}, '
+    '"exit_rules":{...}, "risk":{"stop_loss_pct":0.08,"take_profit_pct":0.20}, '
+    '"apply_costs":true, "engine":"unified"}'
+)

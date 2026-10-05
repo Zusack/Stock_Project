@@ -19,7 +19,7 @@ from typing import Any
 
 from src.analysis.intraday_common import interval_to_seconds, utc_timestamp_str
 from src.analysis.intraday_ingest import upsert_intraday_rows
-from src.analysis.ticker_registry import list_focus_symbols
+from src.analysis.watchlist_schema import resolve_watchlist_symbols
 from src.services.event_bus import event_bus
 from src.services.stock_config import stock_config
 from src.utils.logger_utils import app_logger
@@ -110,7 +110,11 @@ class LiveStreamService:
         chart_symbol: str | None = None,
         extra_symbols: list[str] | None = None,
     ) -> list[str]:
-        """Build deduped symbol list for WebSocket subscription (max 30)."""
+        """Build deduped symbol list for WebSocket subscription (max 30).
+
+        Chart symbol and Also-stream extras are reserved first so a large focus
+        watchlist cannot push them out of the subscription cap.
+        """
         cfg = stock_config()
         out: list[str] = []
         seen: set[str] = set()
@@ -124,13 +128,13 @@ class LiveStreamService:
             seen.add(s)
             out.append(s)
 
-        if cfg.live_stream_symbols_source != "custom":
-            for row in list_focus_symbols(cfg.db_path):
-                _add(row.symbol)
-
         _add(chart_symbol)
         for sym in extra_symbols or []:
             _add(sym)
+
+        if cfg.live_stream_symbols_source != "custom":
+            for sym in resolve_watchlist_symbols(cfg.db_path):
+                _add(sym)
 
         return out[:30]
 
@@ -243,9 +247,6 @@ class LiveStreamService:
         chart_symbol: str | None = None,
         extra_symbols: list[str] | None = None,
     ) -> dict[str, Any]:
-        if self._state.running:
-            return {"ok": True, "message": "Stream already running.", "symbols": self._state.symbols}
-
         cfg = stock_config()
         if not cfg.finnhub_api_key:
             return {
@@ -265,6 +266,16 @@ class LiveStreamService:
                     "'Also stream', or add tickers to the focus watchlist."
                 ),
             }
+
+        if self._state.running:
+            if list(self._state.symbols) == symbols:
+                return {
+                    "ok": True,
+                    "message": "Stream already running.",
+                    "symbols": self._state.symbols,
+                }
+            # Symbol set changed — restart so Also-stream / chart updates apply.
+            self.stop()
 
         self._state.stop_event.clear()
         self._state.symbols = symbols

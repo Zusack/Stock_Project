@@ -32,6 +32,7 @@ class ModelStatus:
     message: str
     tone: StatusTone
     setup_btn_text: str
+    show_refresh: bool = False
 
 
 def active_model_id() -> str:
@@ -81,18 +82,20 @@ def resolve_model_status(
             return ModelStatus(
                 message=(
                     f"{backend_label} disconnected. Start it in the background "
-                    "to continue using the loaded model."
+                    "and click Refresh to check again."
                 ),
                 tone="error",
                 setup_btn_text="Setup model",
+                show_refresh=True,
             )
         return ModelStatus(
             message=(
-                f"{backend_label} is not running. Start it in the background, "
-                "then open Setup model to connect."
+                f"{backend_label} is not running. Start it in the background "
+                "and click Refresh to check again."
             ),
             tone="error",
             setup_btn_text="Setup model",
+            show_refresh=True,
         )
 
     active = active_loaded or configured
@@ -168,11 +171,18 @@ class ModelSetupBar(ft.Container):
             visible=False,
             on_click=self._handle_back_click,
         )
+        self._refresh_btn = ft.IconButton(
+            icon=ft.Icons.REFRESH,
+            tooltip="Check backend connection again",
+            visible=False,
+            on_click=self._handle_refresh_click,
+        )
         super().__init__(
             content=ft.Row(
                 [
                     self._status_icon,
                     self._status_text,
+                    self._refresh_btn,
                     self._setup_btn,
                     self._back_btn,
                 ],
@@ -203,6 +213,15 @@ class ModelSetupBar(ft.Container):
     def _handle_back_click(self, _e) -> None:
         if self._on_close_setup:
             self._on_close_setup()
+
+    def _handle_refresh_click(self, _e) -> None:
+        global _conn_probe_in_flight
+
+        invalidate_backend_connection_cache()
+        with _conn_lock:
+            _conn_probe_in_flight = False
+        self.refresh(force_probe=True)
+        self.touch()
 
     def _maybe_probe_connection(self, *, force: bool = False) -> None:
         global _conn_probe_in_flight, _conn_ok, _conn_checked_at
@@ -264,6 +283,8 @@ class ModelSetupBar(ft.Container):
         self._status_text.value = status.message
         self._status_text.color = ThemeHelper.text_primary(page)
         self._setup_btn.text = status.setup_btn_text
+        self._refresh_btn.visible = status.show_refresh
+        self._refresh_btn.disabled = _conn_probe_in_flight
 
         if status.tone == "setup":
             self._status_icon.name = ft.Icons.MEMORY

@@ -22,9 +22,14 @@ Machine-readable defaults live in `src/analysis/canslim_rulebook.py`. This docum
 |------|-----------|----------|
 | Stop loss | -7% to -8% from entry | 1 |
 | Take profit | +20% to +25% from entry | 2 |
+| Profit zone | +20% to +25% (sell into strength) | 2b |
+| 8-week hold exception | If +20% within ~3 weeks, defer profit-taking until ~8 weeks (stop still applies) | — |
 | Round-trip | Gave up 10%+ gain, now below entry | 3 |
 | Below 50-day simple moving average | Close below 50-day line | 4 |
 | Market downtrend | Index below 50-day simple moving average | 5 |
+
+Stop-loss values from the Strategy UI are positive magnitudes (e.g. `0.08`). The engine
+normalizes them to a signed threshold (`-0.08`) before comparing to return-from-entry.
 
 ## Cup-with-handle geometry
 

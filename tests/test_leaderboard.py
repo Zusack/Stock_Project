@@ -31,7 +31,7 @@ def test_rows_to_display_rename():
     out = rows_to_display_df(df)
     assert "Ticker" in out.columns
     assert "Composite" in out.columns
-    assert out.iloc[0]["CANSLIM"] == "6/6"
+    assert out.iloc[0]["CANSLM"] == "6/6"
     assert out.iloc[0]["Setup"] == "Yes"
 
 

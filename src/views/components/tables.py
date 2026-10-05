@@ -13,6 +13,13 @@ from src.views.theme import InputStyles, ThemeHelper
 _PLACEHOLDER_COLUMN_LABEL = "—"
 
 
+def placeholder_data_columns(
+    label: str = _PLACEHOLDER_COLUMN_LABEL,
+) -> list[ft.DataColumn]:
+    """Flet requires at least one visible DataColumn; use this when clearing a table."""
+    return [ft.DataColumn(ft.Text(label))]
+
+
 def themed_data_table(
     page,
     *,
@@ -23,7 +30,7 @@ def themed_data_table(
 ) -> ft.DataTable:
     """Build a DataTable using shared theme styling (borders, heading row, sizes)."""
     if not columns:
-        columns = [ft.DataColumn(ft.Text(placeholder_label))]
+        columns = placeholder_data_columns(placeholder_label)
     kwargs = ThemeHelper.results_summary_data_table_kwargs(page)
     kwargs.update(extra)
     return ft.DataTable(columns=columns, rows=rows or [], **kwargs)

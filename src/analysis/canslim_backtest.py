@@ -21,7 +21,12 @@ from src.analysis.backtest_common import (
     pct_returns_from_start,
     simulate_portfolio_values,
 )
-from src.analysis.canslim_rulebook import CanslimRuleSet, rule_set_from_config
+from src.analysis.canslim_rulebook import (
+    CanslimRuleSet,
+    normalize_stop_loss_pct,
+    normalize_take_profit_pct,
+    rule_set_from_config,
+)
 from src.analysis.canslim_signals import build_canslim_frame
 from src.analysis.bulk_loaders import load_fundamentals_eps_by_ticker, load_history_grouped
 from src.analysis.db import db_connection, list_tickers, load_market_data
@@ -106,15 +111,35 @@ def evaluate_exit(
     *,
     below_sma: bool = False,
     market_off: bool = False,
+    bars_held: int = 0,
+    hit_early_surge: bool = False,
 ) -> tuple[bool, str]:
-    """Return (should_exit, reason) using O'Neil-style precedence."""
+    """Return (should_exit, reason) using O'Neil-style precedence.
+
+    Stop loss is always a loss vs entry (negative threshold). UI/presets may
+    pass a positive magnitude; both signs are accepted here.
+    """
     ex = rules.exit
-    if pct_change <= ex.stop_loss_pct:
+    stop = normalize_stop_loss_pct(ex.stop_loss_pct)
+    take_profit = normalize_take_profit_pct(ex.take_profit_pct)
+
+    if pct_change <= stop:
         return True, "Stop Loss"
-    if pct_change >= ex.take_profit_pct:
-        return True, "Take Profit"
-    if ex.profit_zone_min_pct <= pct_change <= ex.profit_zone_max_pct:
-        return True, "Profit Zone"
+
+    # IBD 8-week hold: defer mechanical profit-taking after a fast +20% surge.
+    hold_lock = (
+        ex.eight_week_hold_enabled
+        and hit_early_surge
+        and bars_held < ex.eight_week_hold_min_bars
+    )
+    if not hold_lock:
+        if pct_change >= take_profit:
+            return True, "Take Profit"
+        zone_lo = min(ex.profit_zone_min_pct, ex.profit_zone_max_pct)
+        zone_hi = max(ex.profit_zone_min_pct, ex.profit_zone_max_pct)
+        if zone_lo <= pct_change <= zone_hi:
+            return True, "Profit Zone"
+
     if (
         ex.round_trip_exit_if_below_entry
         and peak_gain_pct >= ex.round_trip_min_gain_pct
@@ -241,9 +266,11 @@ def process_ticker_backtest(args):
     position = 0
     entry_price = 0.0
     entry_date = None
+    entry_idx = -1
     entry_triggers = ""
     entry_flags: dict[str, bool] = {}
     peak_gain = 0.0
+    hit_early_surge = False
     entry_base_type = ""
     entry_pattern_quality = 0.0
     prices = df["Adj Close"].values
@@ -262,6 +289,7 @@ def process_ticker_backtest(args):
                 position = 1
                 entry_price = price
                 entry_date = date
+                entry_idx = i
                 flags = _entry_flags_row(df, i)
                 entry_flags = flags
                 extra = []
@@ -271,11 +299,19 @@ def process_ticker_backtest(args):
                     f" [{','.join(extra)}]" if extra else ""
                 )
                 peak_gain = 0.0
+                hit_early_surge = False
                 entry_base_type = str(df["Base_Type"].iloc[i]) if "Base_Type" in df.columns else ""
                 entry_pattern_quality = float(df["Pattern_Quality"].iloc[i]) if "Pattern_Quality" in df.columns else 0.0
         elif position == 1:
             pct_change = (price - entry_price) / entry_price
             peak_gain = max(peak_gain, pct_change)
+            bars_held = i - entry_idx
+            if (
+                not hit_early_surge
+                and bars_held <= rules.exit.eight_week_hold_surge_bars
+                and pct_change >= rules.exit.eight_week_hold_surge_pct
+            ):
+                hit_early_surge = True
             sma_val = sma50[i]
             below_sma = not pd.isna(sma_val) and price < float(sma_val)
             market_off = not bool(pass_m[i])
@@ -287,6 +323,8 @@ def process_ticker_backtest(args):
                 rules,
                 below_sma=below_sma,
                 market_off=market_off,
+                bars_held=bars_held,
+                hit_early_surge=hit_early_surge,
             )
             if should_exit:
                 position = 0
@@ -311,6 +349,8 @@ def process_ticker_backtest(args):
                 )
                 entry_triggers = ""
                 entry_flags = {}
+                entry_idx = -1
+                hit_early_surge = False
 
     if position == 1:
         final_price = float(prices[-1])

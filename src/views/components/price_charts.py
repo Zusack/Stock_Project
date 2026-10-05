@@ -25,8 +25,12 @@ from src.views.components.chart_factory import (
     trend_insight_panel,
     y_axis_decimals,
 )
+from src.utils.format_utils import slice_price_df
 from src.views.components.stock_charts import SeriesSpec, build_multi_series_chart
 from src.views.theme import ThemeHelper
+
+_INDEX_SMA_PERIOD = 50
+_INDEX_SMA_DASH = [6, 4]
 
 _LEFT_AXIS_LABEL_SIZE = 56
 _BOTTOM_AXIS_LABEL_SIZE = 48
@@ -106,6 +110,64 @@ class IndexSeries:
     values: list[float]
     color: str
     timestamps: list[str] | None = None
+    dash_pattern: list[int] | None = None
+    stroke_width: float | None = None
+    show_points: bool | None = None
+
+
+def prepare_market_index_series(
+    df_full: pd.DataFrame | None,
+    *,
+    label: str,
+    color: str,
+    interval_key: str,
+    include_sma50: bool = False,
+    sma_period: int = _INDEX_SMA_PERIOD,
+) -> list[IndexSeries]:
+    """Build normalized % index lines (and optional SMA overlay) for one benchmark."""
+    df = slice_price_df(df_full, interval_key)
+    if df is None or df.empty:
+        return []
+    close = df["Adj Close"].astype(float).dropna()
+    if len(close) < 2:
+        return []
+    base = float(close.iloc[0])
+    if base == 0:
+        return []
+    dates = [pd.Timestamp(x).strftime("%Y-%m-%d") for x in close.index]
+    pct = [((float(p) / base) - 1.0) * 100.0 for p in close.tolist()]
+    series = [
+        IndexSeries(label=label, values=pct, color=color, timestamps=dates),
+    ]
+    if not include_sma50 or df_full is None or df_full.empty:
+        return series
+
+    adj_close = df_full["Adj Close"].astype(float).ffill()
+    sma = (
+        adj_close.rolling(sma_period, min_periods=sma_period)
+        .mean()
+        .reindex(close.index)
+    )
+    sma_pct: list[float] = []
+    sma_dates: list[str] = []
+    for date, value in zip(dates, sma.tolist()):
+        if pd.isna(value):
+            continue
+        sma_pct.append(((float(value) / base) - 1.0) * 100.0)
+        sma_dates.append(date)
+    if len(sma_pct) >= 2:
+        series.append(
+            IndexSeries(
+                label=f"{label} · 50 SMA",
+                values=sma_pct,
+                color=color,
+                timestamps=sma_dates,
+                dash_pattern=list(_INDEX_SMA_DASH),
+                stroke_width=2,
+                show_points=False,
+            )
+        )
+    return series
 
 
 def build_candlestick_chart(
@@ -221,6 +283,9 @@ def build_index_comparison_chart(
             values=spec.values,
             color=spec.color,
             timestamps=spec.timestamps,
+            dash_pattern=spec.dash_pattern,
+            stroke_width=spec.stroke_width,
+            show_points=spec.show_points,
         )
         for spec in series_list
         if len(spec.values) >= 2

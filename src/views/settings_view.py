@@ -116,11 +116,11 @@ class SettingsView(BaseView):
             width=220,
             options=[
                 ft.dropdown.Option("v2", "v2 — Balanced multi-factor (default)"),
-                ft.dropdown.Option("v1", "v1 — Legacy CANSLIM weights"),
+                ft.dropdown.Option("v1", "v1 — Legacy CANSLM weights"),
             ],
             tooltip=(
                 "v2 uses momentum, quality, value, risk/regime, and sentiment buckets. "
-                "v1 keeps the original five-factor CANSLIM proxy."
+                "v1 keeps the original five-factor CANSLM proxy."
             ),
         )
         self.fundamentals_source_dropdown = ft.Dropdown(
@@ -303,18 +303,18 @@ class SettingsView(BaseView):
 
         # --- Backtest defaults ---
         self.canslim_stop_field = ft.TextField(
-            label="CANSLIM stop loss", value=str(cfg.canslim_stop_loss), width=140
+            label="CANSLM stop loss", value=str(cfg.canslim_stop_loss), width=140
         )
         self.canslim_tp_field = ft.TextField(
-            label="CANSLIM take profit", value=str(cfg.canslim_take_profit), width=140
+            label="CANSLM take profit", value=str(cfg.canslim_take_profit), width=140
         )
         self.canslim_require_pattern_switch = ft.Switch(
-            label="CANSLIM: require cup-with-handle pattern for entries",
+            label="CANSLM: require cup-with-handle pattern for entries",
             value=cfg.canslim_require_pattern,
             tooltip="Backtest only enters when cup-with-handle pattern passes (stricter).",
         )
         self.canslim_rule_version_field = ft.TextField(
-            label="CANSLIM rule set version",
+            label="CANSLM rule set version",
             value=cfg.canslim_rule_set_version,
             width=180,
         )
@@ -516,7 +516,7 @@ class SettingsView(BaseView):
             icon=ft.Icons.SAVE,
             style=ButtonStyles.secondary(),
             on_click=self._save_backtest_settings,
-            tooltip="Save CANSLIM, hybrid, friction, and daily scan settings.",
+            tooltip="Save CANSLM, hybrid, friction, and daily scan settings.",
         )
         self.save_ai_btn = ft.ElevatedButton(
             "Save AI settings",
@@ -819,7 +819,7 @@ class SettingsView(BaseView):
                             ft.Text("Stock Analyzer", weight=ft.FontWeight.BOLD, size=16),
                             ft.Text(
                                 "Local stock research app: ingest Yahoo Finance data into SQLite, "
-                                "run CANSLIM and strategy backtests, and explore optimization tools. "
+                                "run CANSLM and strategy backtests, and explore optimization tools. "
                                 "Not financial advice.",
                                 size=12,
                                 color=ThemeHelper.text_muted(page),

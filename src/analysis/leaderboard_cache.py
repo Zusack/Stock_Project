@@ -260,6 +260,7 @@ def save_leaderboard_snapshot(
             "rating_risk": r.get("rating_risk"),
             "data_confidence": r.get("data_confidence"),
             "score_components_json": r.get("score_components_json"),
+            "canslm_lines": r.get("canslm_lines"),
         }
         extra = {k: v for k, v in extra.items() if v is not None}
         rows.append(
@@ -393,6 +394,7 @@ def load_latest_leaderboard(db_path: str) -> LoadedLeaderboardCache | None:
                 "rating_risk": extra.get("rating_risk", "C"),
                 "data_confidence": extra.get("data_confidence", 1.0),
                 "score_components_json": extra.get("score_components_json", ""),
+                "canslm_lines": extra.get("canslm_lines") or [],
             }
         )
 
@@ -435,6 +437,58 @@ def can_reuse_cached_leaderboard(
     if freshness.state == FRESH:
         return loaded
     return None
+
+
+def leaderboard_row_from_record(rec: dict[str, Any]):
+    """Build a LeaderboardRow from a cache snapshot record dict."""
+    from src.analysis.leaderboard import LeaderboardRow
+
+    return LeaderboardRow(
+        ticker=str(rec.get("ticker", "")),
+        composite_score=float(rec.get("composite_score", 0) or 0),
+        canslim_score=int(rec.get("canslim_score", 0) or 0),
+        pattern_quality=float(rec.get("pattern_quality", 0) or 0),
+        rs_pct=float(rec.get("rs_pct", 0) or 0),
+        volume_ratio=float(rec.get("volume_ratio", 0) or 0),
+        near_high_pct=float(rec.get("near_high_pct", 0) or 0),
+        pass_setup=bool(rec.get("pass_setup")),
+        pass_pattern=bool(rec.get("pass_pattern")),
+        risk_flag=str(rec.get("risk_flag") or ""),
+        latest_price=float(rec.get("latest_price", 0) or 0),
+        sector=str(rec.get("sector") or ""),
+        industry=str(rec.get("industry") or ""),
+        notes=str(rec.get("notes") or ""),
+        news_sentiment=float(rec.get("news_sentiment", 0.5) or 0.5),
+        news_tags=list(rec.get("news_tags") or []),
+        score_version=str(rec.get("score_version") or "v2"),
+        composite_score_v1=float(rec.get("composite_score_v1", 0) or 0),
+        momentum_score=float(rec.get("momentum_score", 0) or 0),
+        quality_score=float(rec.get("quality_score", 0) or 0),
+        value_score=float(rec.get("value_score", 0) or 0),
+        risk_score=float(rec.get("risk_score", 0) or 0),
+        sentiment_score=float(rec.get("sentiment_score", 0) or 0),
+        buy_readiness=float(rec.get("buy_readiness", 0) or 0),
+        sell_pressure=float(rec.get("sell_pressure", 0) or 0),
+        rating_value=str(rec.get("rating_value") or "C"),
+        rating_quality=str(rec.get("rating_quality") or "C"),
+        rating_momentum=str(rec.get("rating_momentum") or "C"),
+        rating_risk=str(rec.get("rating_risk") or "C"),
+        data_confidence=float(rec.get("data_confidence", 1) or 1),
+        score_components_json=str(rec.get("score_components_json") or ""),
+        canslm_lines=list(rec.get("canslm_lines") or []),
+    )
+
+
+def lookup_leaderboard_row(db_path: str, ticker: str):
+    """Return a cached LeaderboardRow for one symbol when a snapshot exists."""
+    loaded = load_latest_leaderboard(db_path)
+    if loaded is None or loaded.df.empty:
+        return None
+    sym = str(ticker).strip().upper()
+    rows = loaded.df[loaded.df["ticker"].astype(str).str.upper() == sym]
+    if rows.empty:
+        return None
+    return leaderboard_row_from_record(rows.iloc[0].to_dict())
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:

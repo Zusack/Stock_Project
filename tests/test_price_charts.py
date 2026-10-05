@@ -64,7 +64,7 @@ def test_index_comparison_uses_real_percent_y_values():
         None,
         [
             IndexSeries("S&P 500", pct_a, "#3730a3"),
-            IndexSeries("Dow", pct_b, "#92400e"),
+            IndexSeries("Dow", pct_b, "#92400e", dash_pattern=[6, 4], stroke_width=2, show_points=False),
         ],
         dates,
         interval_key="month",
@@ -75,6 +75,7 @@ def test_index_comparison_uses_real_percent_y_values():
     assert chart.height == 320
     assert chart.expand is False
     assert len(chart.data_series) >= 2
+    assert chart.data_series[1].dash_pattern == [6, 4]
     ys = [p.y for p in chart.data_series[0].points]
     assert max(ys) > 0.0
     assert chart.min_y == 0.0

@@ -9,8 +9,7 @@ import pandas as pd
 
 from src.analysis.db import load_prices_bulk
 from src.analysis.quote_snapshot import get_quotes_bulk
-from src.analysis.ticker_registry import list_focus_symbols
-from src.analysis.watchlist_schema import list_members, list_watchlists
+from src.analysis.watchlist_schema import list_members, list_watchlists, resolve_watchlist_symbols
 from src.services.stock_config import stock_config
 from src.utils.format_utils import format_change, format_currency, format_large_number, slice_price_df
 from src.views.base_view import BaseView
@@ -115,14 +114,7 @@ class CompareView(BaseView):
         tickers = self._parse_tickers()
         if tickers:
             return tickers
-        cfg = stock_config()
-        wls = list_watchlists(cfg.db_path)
-        if wls:
-            tickers = [m.ticker for m in list_members(cfg.db_path, wls[0].id)[:8]]
-            if tickers:
-                return tickers
-        focus = list_focus_symbols(cfg.db_path)
-        return [r.symbol for r in focus[:8]]
+        return resolve_watchlist_symbols(stock_config().db_path, limit=8)
 
     def _fetch_data(self):
         cfg = stock_config()

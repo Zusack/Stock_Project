@@ -330,6 +330,9 @@ class AssistantView(BaseView):
         if ticker:
             self._pending_ticker = str(ticker).upper()
             self.ticker_field.value = self._pending_ticker
+        prefill = kwargs.get("prefill_message", "")
+        if prefill:
+            self.chat_input.value = str(prefill)
         if kwargs.get("open_models"):
             self._open_models_setup()
         else:

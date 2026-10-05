@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-import re
 import threading
 import time
+from dataclasses import dataclass
 
 import flet as ft
 import pandas as pd
 
 from src.analysis.db import load_intraday_bars
 from src.analysis.intraday_ingest import backfill_intraday, backfill_intraday_today
-from src.analysis.ticker_registry import list_focus_symbols
+from src.analysis.watchlist_schema import resolve_watchlist_symbols
 from src.services.live_stream_service import LiveBarSnapshot, live_stream_service
 from src.services.stock_config import stock_config
+from src.utils.format_utils import format_change, format_currency
 from src.views.base_view import BaseView
 from src.views.components.chart_factory import (
     CHART_MIN_PLOT_HEIGHT,
@@ -22,12 +23,23 @@ from src.views.components.chart_factory import (
     chart_panel_container,
     dynamic_content_slot,
 )
-from src.views.components.stock_charts import build_price_line_chart
 from src.views.components.feedback import AsyncStatusRow, show_snackbar
 from src.views.components.layouts import SectionHeader, ViewTitleBar
+from src.views.components.stock_charts import SeriesSpec, build_multi_series_chart, build_price_line_chart
 from src.views.theme import ButtonStyles, InputStyles, ThemeHelper
 from src.views.ui_helpers import on_ticker_field_blur, parse_symbols
 
+_CHART_COLOR_KEYS = ("price", "ma_short", "ma_long", "volume", "warning")
+
+
+@dataclass(frozen=True)
+class SessionDayStats:
+    ticker: str
+    last: float
+    session_open: float
+    change: float
+    change_pct: float
+    bar_count: int
 
 
 def _bars_to_series(bars: list[LiveBarSnapshot]) -> tuple[list[str], list[float]]:
@@ -39,6 +51,52 @@ def _bars_to_series(bars: list[LiveBarSnapshot]) -> tuple[list[str], list[float]
     return labels, closes
 
 
+def resolve_chart_symbols(chart_symbol: str, extra_symbols: list[str] | None = None) -> list[str]:
+    """Deduped symbols shown on the Live plot: chart symbol first, then Also stream."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in [chart_symbol, *(extra_symbols or [])]:
+        sym = str(raw or "").strip().upper()
+        if not sym or sym.startswith("^") or sym in seen:
+            continue
+        seen.add(sym)
+        out.append(sym)
+    return out
+
+
+def session_day_stats(ticker: str, bars: list[LiveBarSnapshot]) -> SessionDayStats | None:
+    """Day move from the session's first bar open to the latest close."""
+    if not bars:
+        return None
+    open_px = float(bars[0].open)
+    last = float(bars[-1].close)
+    if open_px == 0:
+        return None
+    change = last - open_px
+    return SessionDayStats(
+        ticker=ticker.strip().upper(),
+        last=last,
+        session_open=open_px,
+        change=change,
+        change_pct=(last / open_px - 1.0) * 100.0,
+        bar_count=len(bars),
+    )
+
+
+def _bars_to_session_pct_series(
+    bars: list[LiveBarSnapshot],
+) -> tuple[list[str], list[float]] | None:
+    """Normalize closes to % change from the session open (first bar open)."""
+    if not bars:
+        return None
+    base = float(bars[0].open)
+    if base == 0:
+        return None
+    timestamps = [b.timestamp for b in bars]
+    pct = [((float(b.close) / base) - 1.0) * 100.0 for b in bars]
+    return timestamps, pct
+
+
 class LiveView(BaseView):
     _tab_index = 8
 
@@ -47,6 +105,7 @@ class LiveView(BaseView):
         self._stream = live_stream_service()
         self._backfill_running = False
         self._stream_starting = False
+        self._start_in_flight = False
         self._waiting_for_live = False
         self._stream_started_at: float | None = None
 
@@ -56,18 +115,18 @@ class LiveView(BaseView):
         if focus_symbols:
             self.focus_pick_dropdown = InputStyles.dropdown(
                 page,
-                label="Focus watchlist",
+                label="Watchlist",
                 value=default_sym,
                 width=180,
                 options=[ft.dropdown.Option(s) for s in focus_symbols],
                 on_select=self._on_focus_pick,
-                tooltip="Quick-pick from your focus watchlist (Watchlist tab).",
+                tooltip="Quick-pick from your saved watchlist (Watchlists tab).",
             )
             self._focus_pick_control: ft.Control = self.focus_pick_dropdown
         else:
             self.focus_pick_dropdown = None
             self._focus_pick_control = ft.Text(
-                "No focus symbols yet — add tickers on the Watchlist tab or type below.",
+                "No watchlist symbols yet — add tickers on the Watchlists tab or type below.",
                 size=12,
                 color=ThemeHelper.text_muted(page),
             )
@@ -78,7 +137,7 @@ class LiveView(BaseView):
             width=140,
             hint_text="e.g. AAPL",
             on_blur=on_ticker_field_blur(multi=False),
-            tooltip="Symbol shown on the intraday chart.",
+            tooltip="Primary symbol on the shared intraday chart.",
         )
         self.stream_symbols_field = InputStyles.text_field(
             page,
@@ -87,31 +146,45 @@ class LiveView(BaseView):
             width=360,
             on_blur=on_ticker_field_blur(multi=True),
             tooltip=(
-                "Extra symbols to subscribe on the live feed (comma/space separated). "
-                "Combined with focus watchlist unless Settings uses chart-only mode."
+                "Extra symbols plotted on the same chart and subscribed on the live feed "
+                "(comma/space separated). Watchlist symbols are also subscribed "
+                "unless Settings uses chart-only mode."
             ),
         )
         self.start_btn = ft.ElevatedButton(
             "Start stream",
             icon=ft.Icons.PLAY_ARROW,
-            style=ButtonStyles.primary(),
+            style=ButtonStyles.primary(page),
             on_click=self._on_start_stream,
         )
-        self.stop_btn = ft.OutlinedButton(
+        self.stop_btn = ft.ElevatedButton(
             "Stop stream",
             icon=ft.Icons.STOP,
+            style=ButtonStyles.secondary(page),
+            disabled=True,
             on_click=self._on_stop_stream,
         )
         self.backfill_btn = ft.OutlinedButton(
             "Backfill history",
             icon=ft.Icons.CLOUD_DOWNLOAD,
             on_click=self._on_backfill,
-            tooltip="Download recent minute bars from Yahoo Finance for focus watchlist.",
+            tooltip="Download recent minute bars from Yahoo Finance for chart + Also stream symbols.",
         )
         self.async_status = AsyncStatusRow(page)
         self.stream_status = ft.Text("", size=12, color=ThemeHelper.text_muted(page))
         self._chart_placeholder = "Select a symbol and start streaming."
         self.chart_slot = dynamic_content_slot(page, self._chart_placeholder)
+        self.session_summary = ft.Column(
+            [
+                ft.Text(
+                    "Session summary appears after bars load.",
+                    size=12,
+                    color=ThemeHelper.text_muted(page),
+                )
+            ],
+            spacing=4,
+            tight=True,
+        )
 
         self._setup_pubsub({"intraday_bar": self._on_intraday_bar_event})
         self.controls = [
@@ -121,8 +194,8 @@ class LiveView(BaseView):
                 "Live 1-minute bars via Finnhub (real-time trades aggregated), "
                 "history backfilled from Yahoo Finance. "
                 "Add your free Finnhub key under Settings → Intraday / Live Data. "
-                "Symbols come from the focus watchlist, the chart symbol field, and "
-                "optional 'Also stream' entries.",
+                "Chart symbol and Also stream share one plot; your watchlist "
+                "is also subscribed for live data unless Settings uses chart-only mode.",
                 size=12,
                 color=ThemeHelper.text_muted(page),
             ),
@@ -153,19 +226,39 @@ class LiveView(BaseView):
                 self.chart_slot,
                 min_height=CHART_MIN_PLOT_HEIGHT + 200,
             ),
+            SectionHeader("Session summary", icon=ft.Icons.SHOW_CHART, page_ref=page),
+            self.session_summary,
         ]
+        self._sync_stream_buttons()
         self._refresh_chart_from_sources()
+
+    def _sync_stream_buttons(self) -> None:
+        """Enable Start/Stop from stream state (matches other Start/Stop tabs)."""
+        running = bool(self._stream.is_running)
+        self.start_btn.disabled = running or self._start_in_flight
+        self.stop_btn.disabled = not running
+        try:
+            self.start_btn.update()
+            self.stop_btn.update()
+        except RuntimeError:
+            pass
 
     @staticmethod
     def _load_focus_symbols() -> list[str]:
-        rows = list_focus_symbols(stock_config().db_path)
-        return [r.symbol for r in rows if r.symbol and not str(r.symbol).startswith("^")]
+        return [
+            s
+            for s in resolve_watchlist_symbols(stock_config().db_path)
+            if s and not str(s).startswith("^")
+        ]
 
     def _extra_stream_symbols(self) -> list[str]:
         return parse_symbols(self.stream_symbols_field.value or "", exclude_indices=True)
 
     def _current_symbol(self) -> str:
         return (self.chart_symbol_field.value or "").strip().upper()
+
+    def _chart_symbols(self) -> list[str]:
+        return resolve_chart_symbols(self._current_symbol(), self._extra_stream_symbols())
 
     def _on_focus_pick(self, e) -> None:
         if self.focus_pick_dropdown is None:
@@ -242,7 +335,7 @@ class LiveView(BaseView):
             f"Each completed bar appears when the minute rolls over{elapsed}."
         )
 
-    def _update_stream_status(self, *, bars: list[LiveBarSnapshot] | None = None) -> None:
+    def _update_stream_status(self, *, bar_count: int | None = None) -> None:
         if self._stream_starting:
             self.stream_status.value = "Preparing live stream…"
             return
@@ -256,13 +349,142 @@ class LiveView(BaseView):
         syms = ", ".join(self._stream.subscribed_symbols[:8])
         suffix = "…" if len(self._stream.subscribed_symbols) > 8 else ""
         bar_note = ""
-        if bars is not None:
-            bar_note = f" · {len(bars)} bar(s) on chart"
+        if bar_count is not None:
+            plotted = ", ".join(self._chart_symbols()[:6])
+            bar_note = f" · {bar_count} bar(s) · chart: {plotted}"
         self.stream_status.value = f"Streaming: {syms}{suffix}{bar_note}"
 
+    def _render_session_summary(self, stats: list[SessionDayStats]) -> None:
+        page = self.page_ref
+        if not stats:
+            self.session_summary.controls = [
+                ft.Text(
+                    "No session bars yet for the chart symbols.",
+                    size=12,
+                    color=ThemeHelper.text_muted(page),
+                )
+            ]
+            return
+
+        rows: list[ft.Control] = [
+            ft.Text(
+                "Day move vs session open (first minute bar).",
+                size=11,
+                color=ThemeHelper.text_muted(page),
+            )
+        ]
+        for item in stats:
+            if item.change_pct > 0:
+                chg_color = ThemeHelper.accent_green(page)
+            elif item.change_pct < 0:
+                chg_color = ThemeHelper.text_error(page)
+            else:
+                chg_color = ThemeHelper.text_primary(page)
+            rows.append(
+                ft.Row(
+                    [
+                        ft.Text(
+                            item.ticker,
+                            size=13,
+                            weight=ft.FontWeight.W_600,
+                            width=72,
+                            color=ThemeHelper.text_primary(page),
+                        ),
+                        ft.Text(
+                            format_currency(item.last),
+                            size=13,
+                            width=96,
+                            color=ThemeHelper.text_primary(page),
+                        ),
+                        ft.Text(
+                            format_change(item.change, item.change_pct),
+                            size=13,
+                            color=chg_color,
+                        ),
+                        ft.Text(
+                            f"{item.bar_count} bars",
+                            size=11,
+                            color=ThemeHelper.text_muted(page),
+                        ),
+                    ],
+                    spacing=16,
+                    wrap=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            )
+        self.session_summary.controls = rows
+
+    def _build_chart_content(
+        self,
+        symbols: list[str],
+        bars_by_sym: dict[str, list[LiveBarSnapshot]],
+    ) -> ft.Control:
+        if len(symbols) == 1:
+            sym = symbols[0]
+            bars = bars_by_sym.get(sym) or []
+            timestamps, closes = _bars_to_series(bars)
+            return build_price_line_chart(
+                self.page_ref,
+                sym,
+                timestamps,
+                closes,
+                height=360,
+                time_fmt="intraday",
+            )
+
+        series_specs: list[SeriesSpec] = []
+        for i, sym in enumerate(symbols):
+            bars = bars_by_sym.get(sym) or []
+            series = _bars_to_session_pct_series(bars)
+            if series is None or len(series[1]) < 1:
+                continue
+            timestamps, pct = series
+            if len(pct) == 1:
+                timestamps = [timestamps[0], timestamps[0]]
+                pct = [pct[0], pct[0]]
+            color_key = _CHART_COLOR_KEYS[i % len(_CHART_COLOR_KEYS)]
+            series_specs.append(
+                SeriesSpec(
+                    label=sym,
+                    values=pct,
+                    color=ThemeHelper.chart_named(self.page_ref, color_key),
+                    timestamps=timestamps,
+                )
+            )
+
+        if not series_specs:
+            return chart_empty_state(
+                self.page_ref,
+                "No intraday data for the selected chart symbols.",
+            )
+
+        return build_multi_series_chart(
+            self.page_ref,
+            series_specs,
+            [],
+            y_title="% vs open",
+            x_title="Time (UTC)",
+            time_fmt="intraday",
+            signed_y=True,
+            show_zero_baseline=True,
+            height=360,
+            expand=False,
+            subtitle="Normalized from each symbol's session open · shared timeline",
+            insights_label=series_specs[0].label,
+            extra_insights=[
+                f"{s.ticker}: {format_change(s.change, s.change_pct)} from open"
+                for s in (
+                    session_day_stats(sym, bars_by_sym.get(sym) or [])
+                    for sym in symbols
+                )
+                if s is not None
+            ],
+        )
+
     def _refresh_chart_from_sources(self) -> None:
-        sym = self._current_symbol()
-        if not sym:
+        symbols = self._chart_symbols()
+        if not symbols:
+            self._render_session_summary([])
             return
         if self._stream_starting:
             self.chart_slot.content = chart_loading_state(
@@ -275,12 +497,20 @@ class LiveView(BaseView):
             try:
                 self.chart_slot.update()
                 self.stream_status.update()
+                self.session_summary.update()
             except RuntimeError:
                 pass
             return
 
-        bars = self._merge_bars(sym)
-        if self._waiting_for_live and len(bars) < 2:
+        bars_by_sym = {sym: self._merge_bars(sym) for sym in symbols}
+        max_bars = max((len(b) for b in bars_by_sym.values()), default=0)
+        stats = [
+            s
+            for sym in symbols
+            if (s := session_day_stats(sym, bars_by_sym.get(sym) or [])) is not None
+        ]
+
+        if self._waiting_for_live and max_bars < 2:
             self.chart_slot.content = chart_loading_state(
                 self.page_ref,
                 "Waiting for live trades…",
@@ -288,29 +518,24 @@ class LiveView(BaseView):
                 height=CHART_MIN_PLOT_HEIGHT,
             )
         else:
-            if self._waiting_for_live and len(bars) >= 2:
+            if self._waiting_for_live and max_bars >= 2:
                 self._waiting_for_live = False
-            timestamps, closes = _bars_to_series(bars)
-            self.chart_slot.content = build_price_line_chart(
-                self.page_ref,
-                sym,
-                timestamps,
-                closes,
-                height=360,
-                time_fmt="intraday",
-            )
+            self.chart_slot.content = self._build_chart_content(symbols, bars_by_sym)
+
         self.chart_slot.height = None
         self.chart_slot.expand = False
-        self._update_stream_status(bars=bars)
+        self._render_session_summary(stats)
+        self._update_stream_status(bar_count=max_bars)
         try:
             self.chart_slot.update()
             self.stream_status.update()
+            self.session_summary.update()
         except RuntimeError:
             pass
 
     def _on_intraday_bar_event(self, *, ticker: str, bar: LiveBarSnapshot | None = None, **_) -> None:
-        sym = self._current_symbol()
-        if not sym or ticker.upper() != sym:
+        chart_syms = set(self._chart_symbols())
+        if not chart_syms or ticker.upper() not in chart_syms:
             return
         if self._waiting_for_live:
             self._waiting_for_live = False
@@ -327,13 +552,19 @@ class LiveView(BaseView):
         if not sym:
             show_snackbar(self.page_ref, "Select a symbol.", severity="warning")
             return
-        if self._stream_starting:
+        if self._stream_starting or self._start_in_flight or self._stream.is_running:
             return
+        chart_syms = self._chart_symbols()
         self._stream_starting = True
+        self._start_in_flight = True
         self._waiting_for_live = False
         self._stream_started_at = None
+        self._sync_stream_buttons()
+        label = ", ".join(chart_syms[:4])
+        if len(chart_syms) > 4:
+            label += "…"
         self.async_status.set_running(
-            f"Loading today's session for {sym}…",
+            f"Loading today's session for {label}…",
             progress=0.05,
         )
         self._refresh_chart_from_sources()
@@ -363,6 +594,7 @@ class LiveView(BaseView):
                     "Connecting to Finnhub live feed…",
                     progress=0.85,
                 )
+                self._sync_stream_buttons()
                 self._refresh_chart_from_sources()
                 try:
                     self.update()
@@ -378,12 +610,16 @@ class LiveView(BaseView):
 
             def _ui():
                 self._stream_starting = False
+                self._start_in_flight = False
                 if result.get("ok"):
                     self._stream_started_at = time.time()
                     backfill_ok = backfill_summary.get("success", 0)
                     backfill_total = backfill_summary.get("total", 0)
-                    chart_bars = len(self._merge_bars(sym))
-                    if chart_bars >= 2:
+                    max_bars = max(
+                        (len(self._merge_bars(s)) for s in chart_syms),
+                        default=0,
+                    )
+                    if max_bars >= 2:
                         self._waiting_for_live = False
                         self.async_status.set_success(
                             f"Live stream active ({len(result.get('symbols', []))} symbols). "
@@ -405,6 +641,7 @@ class LiveView(BaseView):
                         severity="error",
                     )
                     self._refresh_chart_from_sources()
+                self._sync_stream_buttons()
                 try:
                     self.update()
                 except RuntimeError:
@@ -415,11 +652,16 @@ class LiveView(BaseView):
         threading.Thread(target=_work, daemon=True).start()
 
     def _on_stop_stream(self, e) -> None:
+        if not self._stream.is_running:
+            self._sync_stream_buttons()
+            return
         self._stream.stop()
         self._stream_starting = False
+        self._start_in_flight = False
         self._waiting_for_live = False
         self._stream_started_at = None
         self.async_status.set_idle("Stream stopped.")
+        self._sync_stream_buttons()
         self._refresh_chart_from_sources()
         show_snackbar(self.page_ref, "Live stream stopped.", severity="info")
 
@@ -435,8 +677,7 @@ class LiveView(BaseView):
             pass
 
         def _work():
-            sym = self._current_symbol()
-            tickers = [sym] if sym else None
+            tickers = self._chart_symbols() or None
 
             def _progress(pct: float, msg: str) -> None:
                 self.async_status.set_running(msg)
@@ -487,6 +728,7 @@ class LiveView(BaseView):
                 self.focus_pick_dropdown.value = focus[0]
         if not (data.get("sym") or "").strip() and focus:
             self.chart_symbol_field.value = focus[0]
+        self._sync_stream_buttons()
         self._refresh_chart_from_sources()
         try:
             self.update()
@@ -500,7 +742,10 @@ class LiveView(BaseView):
             [self.chart_symbol_field, self.stream_symbols_field],
             dropdowns,
         )
+        self.start_btn.style = ButtonStyles.primary(self.page_ref)
+        self.stop_btn.style = ButtonStyles.secondary(self.page_ref)
         self.async_status.refresh_theme(self.page_ref)
+        self._sync_stream_buttons()
         try:
             self.update()
         except RuntimeError:
@@ -510,4 +755,5 @@ class LiveView(BaseView):
         pass
 
     def on_tab_activated(self) -> None:
+        self._sync_stream_buttons()
         self.refresh_data()

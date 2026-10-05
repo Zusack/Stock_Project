@@ -25,7 +25,8 @@ def test_resolve_unreachable_does_not_show_configured_as_active():
     )
     assert status is not None
     assert status.tone == "error"
-    assert "not running" in status.message.lower()
+    assert status.show_refresh is True
+    assert "refresh" in status.message.lower()
     assert "gpt-oss" not in status.message
 
 
@@ -68,4 +69,5 @@ def test_resolve_disconnected_after_load():
     )
     assert status is not None
     assert status.tone == "error"
+    assert status.show_refresh is True
     assert "disconnected" in status.message.lower()

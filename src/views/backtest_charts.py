@@ -361,3 +361,178 @@ def build_portfolio_chart(
             ft.Text(note, size=10, italic=True, color=ThemeHelper.text_muted(page)),
         )
     return ft.Column(body, spacing=6, tight=True, expand=True)
+
+
+def build_equity_comparison_chart(
+    page: ft.Page,
+    *,
+    strategy_dates: list[str],
+    strategy_values: list[float],
+    benchmark_dates: list[str] | None = None,
+    benchmark_values: list[float] | None = None,
+    buy_hold_dates: list[str] | None = None,
+    buy_hold_values: list[float] | None = None,
+    height: int = _PORTFOLIO_PLOT_HEIGHT,
+    initial_capital: float = 10000.0,
+) -> ft.Control:
+    """Strategy equity vs benchmark and buy-and-hold overlays."""
+    if not strategy_dates or not strategy_values:
+        return chart_empty_state(page, "Run a backtest to view the equity curve.")
+
+    display_dates, display_values, _ = downsample_series(strategy_dates, strategy_values)
+    series_list: list[tuple[str, list[float], str]] = [
+        ("Strategy", display_values, "gain"),
+    ]
+
+    if benchmark_dates and benchmark_values:
+        _, bench_disp, _ = downsample_series(benchmark_dates, benchmark_values)
+        if len(bench_disp) == len(display_values):
+            series_list.append(("Benchmark", bench_disp, "ma_short"))
+    if buy_hold_dates and buy_hold_values:
+        _, bh_disp, _ = downsample_series(buy_hold_dates, buy_hold_values)
+        if len(bh_disp) == len(display_values):
+            series_list.append(("Buy & Hold", bh_disp, "volume"))
+
+    all_vals = [v for _, vals, _ in series_list for v in vals]
+    all_vals.append(float(initial_capital))
+    left_axis, scale = normalized_price_axis(
+        page, all_vals, title="Portfolio ($)", tick_count=_Y_TICK_COUNT,
+        label_size=_LEFT_AXIS_LABELS_SIZE,
+    )
+    bottom_axis, x_interval = normalized_time_axis(
+        page, display_dates, title="Date", fmt="monthly", label_size=_BOTTOM_AXIS_LABELS_SIZE,
+    )
+
+    line_series: list[ft.LineChartData] = []
+    legend: list[ft.Control] = []
+    for label, vals, color_key in series_list:
+        color = ThemeHelper.chart_named(page, color_key)
+        use_curve = len(vals) <= CURVED_LINE_MAX_POINTS
+        line_series.append(
+            ft.LineChartData(
+                data_points=_line_points(vals, scale),
+                color=color,
+                stroke_width=2,
+                curved=use_curve,
+            )
+        )
+        legend.append(legend_chip(label, color))
+
+    chart = build_line_chart(
+        page, line_series,
+        min_x=0, max_x=max(len(display_values) - 1, 1),
+        min_y=0.0, max_y=scale.norm_max, y_interval=1.0, x_interval=x_interval,
+        left_axis=left_axis, bottom_axis=bottom_axis,
+        height=height, expand=True, interactive=False, use_tooltip=False,
+    )
+    return ft.Column(
+        [
+            ft.Row(legend, spacing=12, wrap=True),
+            _chart_plot_container(chart, height=height),
+        ],
+        spacing=8, tight=True, expand=True,
+    )
+
+
+def build_drawdown_chart(
+    page: ft.Page,
+    drawdown_pct: list[float],
+    dates: list[str],
+    *,
+    height: int = 200,
+) -> ft.Control:
+    """Underwater / drawdown chart (negative % from peak)."""
+    if not drawdown_pct or not dates:
+        return chart_empty_state(page, "Drawdown chart appears after a backtest run.")
+    display_dates, display_dd, _ = downsample_series(dates, drawdown_pct)
+    left_axis, scale = normalized_signed_axis(
+        page, display_dd, title="Drawdown (%)", tick_count=5,
+        label_size=_LEFT_AXIS_LABELS_SIZE,
+    )
+    bottom_axis, x_interval = normalized_time_axis(
+        page, display_dates, title="", fmt="monthly", label_size=32,
+    )
+    line = ft.LineChartData(
+        data_points=_line_points(display_dd, scale),
+        color=ThemeHelper.chart_named(page, "loss"),
+        stroke_width=2,
+        curved=len(display_dd) <= CURVED_LINE_MAX_POINTS,
+    )
+    chart = build_line_chart(
+        page, [line],
+        min_x=0, max_x=max(len(display_dd) - 1, 1),
+        min_y=0.0, max_y=scale.norm_max, y_interval=1.0, x_interval=x_interval,
+        left_axis=left_axis, bottom_axis=bottom_axis,
+        height=height, expand=True, interactive=False, use_tooltip=False,
+    )
+    return ft.Column(
+        [
+            ft.Text("Drawdown from peak", size=11, color=ThemeHelper.text_muted(page)),
+            _chart_plot_container(chart, height=height),
+        ],
+        spacing=4, tight=True,
+    )
+
+
+def build_compare_equity_chart(
+    page: ft.Page,
+    curves: list[tuple[str, list[str], list[float]]],
+    *,
+    height: int = _PORTFOLIO_PLOT_HEIGHT,
+) -> ft.Control:
+    """Overlay multiple strategy equity curves for compare mode."""
+    if not curves:
+        return chart_empty_state(page, "Run a comparison to view overlaid equity curves.")
+
+    color_keys = ("gain", "ma_short", "ma_long", "volume", "price")
+    prepared: list[tuple[str, list[str], list[float], str]] = []
+    for i, (label, dates, values) in enumerate(curves):
+        if not values:
+            continue
+        disp_dates, disp_vals, _ = downsample_series(
+            dates or [str(j) for j in range(len(values))], values
+        )
+        if not disp_vals:
+            continue
+        prepared.append((label, disp_dates, disp_vals, color_keys[i % len(color_keys)]))
+
+    if not prepared:
+        return chart_empty_state(page, "No equity data to compare.")
+
+    all_vals = [v for _, _, vals, _ in prepared for v in vals]
+    axis_dates = max((dates for _, dates, _, _ in prepared), key=len)
+    max_len = max(len(vals) for _, _, vals, _ in prepared)
+
+    left_axis, scale = normalized_price_axis(
+        page, all_vals, title="Portfolio ($)", tick_count=_Y_TICK_COUNT,
+        label_size=_LEFT_AXIS_LABELS_SIZE,
+    )
+    bottom_axis, x_interval = normalized_time_axis(
+        page, axis_dates, title="Date", fmt="monthly", label_size=_BOTTOM_AXIS_LABELS_SIZE,
+    )
+
+    line_series: list[ft.LineChartData] = []
+    legend: list[ft.Control] = []
+    for label, _dates, vals, color_key in prepared:
+        color = ThemeHelper.chart_named(page, color_key)
+        line_series.append(
+            ft.LineChartData(
+                data_points=_line_points(vals, scale),
+                color=color,
+                stroke_width=2,
+                curved=len(vals) <= CURVED_LINE_MAX_POINTS,
+            )
+        )
+        legend.append(legend_chip(label, color))
+
+    chart = build_line_chart(
+        page, line_series,
+        min_x=0, max_x=max(max_len - 1, 1),
+        min_y=0.0, max_y=scale.norm_max, y_interval=1.0, x_interval=x_interval,
+        left_axis=left_axis, bottom_axis=bottom_axis,
+        height=height, expand=True, interactive=False, use_tooltip=False,
+    )
+    return ft.Column(
+        [ft.Row(legend, spacing=12, wrap=True), _chart_plot_container(chart, height=height)],
+        spacing=8, tight=True, expand=True,
+    )

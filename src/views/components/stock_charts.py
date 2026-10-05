@@ -259,6 +259,9 @@ class SeriesSpec:
     # Per-point dates. When set on any series, all series are aligned to a shared
     # calendar axis so short histories (e.g. IPOs) plot on their real dates.
     timestamps: list[str] | None = None
+    dash_pattern: list[int] | None = None
+    stroke_width: float | None = None
+    show_points: bool | None = None
 
 
 def _master_timeline(
@@ -400,9 +403,10 @@ def build_multi_series_chart(
             ft.LineChartData(
                 data_points=points,
                 color=spec.color,
-                stroke_width=3,
+                stroke_width=spec.stroke_width if spec.stroke_width is not None else 3,
+                dash_pattern=spec.dash_pattern,
                 curved=False,
-                point=True,
+                point=spec.show_points if spec.show_points is not None else True,
             )
         )
         legend.append(legend_chip(spec.label, spec.color))

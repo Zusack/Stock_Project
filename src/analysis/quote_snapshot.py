@@ -43,15 +43,31 @@ class QuoteSnapshot:
 
     @property
     def change(self) -> float | None:
+        """Daily $ change vs previous close (Yahoo/Google-style), not vs today's open."""
         if self.last_price is None or self.prev_close is None or self.prev_close == 0:
             return None
         return self.last_price - self.prev_close
 
     @property
     def change_pct(self) -> float | None:
+        """Daily % change vs previous close (Yahoo/Google-style), not vs today's open."""
         if self.last_price is None or self.prev_close is None or self.prev_close == 0:
             return None
         return (self.last_price / self.prev_close - 1.0) * 100.0
+
+    @property
+    def change_from_open(self) -> float | None:
+        """Intraday $ move from today's open to last price."""
+        if self.last_price is None or self.open is None or self.open == 0:
+            return None
+        return self.last_price - self.open
+
+    @property
+    def change_from_open_pct(self) -> float | None:
+        """Intraday % move from today's open to last price."""
+        if self.last_price is None or self.open is None or self.open == 0:
+            return None
+        return (self.last_price / self.open - 1.0) * 100.0
 
     @property
     def volume_vs_avg(self) -> float | None:

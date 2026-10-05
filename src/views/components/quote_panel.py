@@ -9,7 +9,6 @@ from src.utils.format_utils import (
     format_change,
     format_currency,
     format_large_number,
-    format_percent,
     format_range,
     format_volume,
 )
@@ -33,6 +32,42 @@ def build_quote_header(page: ft.Page, quote: QuoteSnapshot | None, ticker: str) 
         elif quote.change_pct < 0:
             price_color = ThemeHelper.text_error(page)
 
+    from_open_color = ThemeHelper.text_muted(page)
+    if quote.change_from_open_pct is not None:
+        if quote.change_from_open_pct > 0:
+            from_open_color = ThemeHelper.accent_green(page)
+        elif quote.change_from_open_pct < 0:
+            from_open_color = ThemeHelper.text_error(page)
+
+    change_parts: list[ft.Control] = [
+        ft.Text(
+            format_change(quote.change, quote.change_pct),
+            size=16,
+            color=price_color,
+        ),
+        ft.Text(
+            "vs prev close",
+            size=12,
+            color=ThemeHelper.text_muted(page),
+        ),
+    ]
+    if quote.change_from_open is not None or quote.change_from_open_pct is not None:
+        change_parts.extend(
+            [
+                ft.Text("·", size=12, color=ThemeHelper.text_muted(page)),
+                ft.Text(
+                    format_change(quote.change_from_open, quote.change_from_open_pct),
+                    size=14,
+                    color=from_open_color,
+                ),
+                ft.Text(
+                    "from open",
+                    size=12,
+                    color=ThemeHelper.text_muted(page),
+                ),
+            ]
+        )
+
     header = ft.Column(
         [
             ft.Row(
@@ -44,10 +79,11 @@ def build_quote_header(page: ft.Page, quote: QuoteSnapshot | None, ticker: str) 
                         weight=ft.FontWeight.W_700,
                         color=price_color,
                     ),
-                    ft.Text(
-                        format_change(quote.change, quote.change_pct),
-                        size=16,
-                        color=price_color,
+                    ft.Row(
+                        change_parts,
+                        spacing=6,
+                        wrap=True,
+                        vertical_alignment=ft.CrossAxisAlignment.BASELINE,
                     ),
                 ],
                 spacing=16,
@@ -66,6 +102,12 @@ def build_quote_header(page: ft.Page, quote: QuoteSnapshot | None, ticker: str) 
 
     cards = [
         SelectableMetricCard(page, title="Open", value=format_currency(quote.open), accent="teal"),
+        SelectableMetricCard(
+            page,
+            title="Prev close",
+            value=format_currency(quote.prev_close),
+            accent="amber",
+        ),
         SelectableMetricCard(
             page,
             title="Day range",
@@ -124,12 +166,6 @@ def build_quote_header(page: ft.Page, quote: QuoteSnapshot | None, ticker: str) 
             title="Shares out",
             value=format_large_number(quote.shares_outstanding),
             accent="teal",
-        ),
-        SelectableMetricCard(
-            page,
-            title="Prev close",
-            value=format_currency(quote.prev_close),
-            accent="amber",
         ),
     ]
 

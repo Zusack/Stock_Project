@@ -12,9 +12,15 @@ import flet as ft
 import pandas as pd
 
 from src.analysis import ticker_registry as registry
+from src.analysis.watchlist_schema import resolve_watchlist_symbols, sync_watchlist_members_to_registry
+from src.analysis.ticker_evaluation import (
+    clear_ticker_evaluation_session_cache,
+    refresh_canslm_metrics_df,
+)
 from src.analysis.db import count_tickers
 from src.analysis.leaderboard import (
     LeaderboardSegment,
+    fill_unscored_watchlist_gaps,
     filter_leaderboard_segment,
 )
 from src.analysis.leaderboard_runner import run_leaderboard_build
@@ -110,12 +116,12 @@ class LeaderboardView(BaseView):
         self.ticker_filter = InputStyles.text_field(
             page,
             label="Symbols to score (optional)",
-            hint_text="AAPL MSFT — empty uses focus watchlist",
+            hint_text="AAPL MSFT — empty uses watchlist",
             expand=True,
             on_blur=on_ticker_field_blur(multi=True),
             tooltip=(
                 "Applied when you click Refresh rankings: only these symbols are "
-                "scored and cached. Leave empty to use the focus watchlist or full "
+                "scored and cached. Leave empty to use the watchlist or full "
                 "universe (Score full universe). Does not filter the table below."
             ),
         )
@@ -266,7 +272,7 @@ class LeaderboardView(BaseView):
                     value=LeaderboardSegment.WATCHLIST.value,
                     label=ft.Text("Watchlist"),
                     icon=ft.Icon(ft.Icons.BOOKMARK),
-                    tooltip="Focus watchlist symbols, ranked by composite.",
+                    tooltip="Saved watchlist symbols, ranked by composite.",
                 ),
                 ft.Segment(
                     value=LeaderboardSegment.BREAKOUTS.value,
@@ -311,7 +317,7 @@ class LeaderboardView(BaseView):
         ver = cfg.leaderboard_score_version
         if ver == "v1":
             legend = (
-                "Composite v1 (0–100): CANSLIM 35% · Pattern 20% · RS 20% · "
+                "Composite v1 (0–100): CANSLM 35% · Pattern 20% · RS 20% · "
                 "Volume 15% · News 10%"
             )
         else:
@@ -446,12 +452,15 @@ class LeaderboardView(BaseView):
         limit = self._parse_display_limit()
         if len(df) <= limit:
             self._display_truncated_note = ""
-            return df
-        self._display_truncated_note = (
-            f"Showing top {limit} of {len(df)} in this segment "
-            f"(raise Max rows to see more)."
-        )
-        return df.head(limit).copy()
+            display = df.copy()
+        else:
+            self._display_truncated_note = (
+                f"Showing top {limit} of {len(df)} in this segment "
+                f"(raise Max rows to see more)."
+            )
+            display = df.head(limit).copy()
+        cfg = stock_config()
+        return refresh_canslm_metrics_df(display, cfg.db_path, cfg.market_ticker)
 
     def _parse_tickers(self) -> list[str] | None:
         raw = (self.ticker_filter.value or "").strip()
@@ -466,9 +475,7 @@ class LeaderboardView(BaseView):
             return explicit
         if self._score_full_universe:
             return None
-        cfg = stock_config()
-        focus = registry.list_focus_symbols(cfg.db_path)
-        return [r.symbol for r in focus] if focus else []
+        return resolve_watchlist_symbols(stock_config().db_path)
 
     def _universe_count(self) -> int:
         tickers = self._effective_tickers()
@@ -486,7 +493,7 @@ class LeaderboardView(BaseView):
         if self._score_full_universe:
             return "full universe"
         n = self._universe_count()
-        return f"{n} focus symbol(s)" if n else "empty focus watchlist"
+        return f"{n} watchlist symbol(s)" if n else "empty watchlist"
 
     def _current_universe_key(self) -> str:
         return _universe_key(
@@ -968,6 +975,8 @@ class LeaderboardView(BaseView):
             from_cache = False
             effective_tickers = self._effective_tickers()
             try:
+                if effective_tickers is not None:
+                    sync_watchlist_members_to_registry(cfg.db_path)
                 self._update_scoring_ui(
                     "Checking for cached rankings…",
                     pct=None,
@@ -1004,9 +1013,14 @@ class LeaderboardView(BaseView):
                     self._scored_at = datetime.now(timezone.utc)
                     self._last_elapsed_sec = time.perf_counter() - started
 
+                if effective_tickers is not None:
+                    df_all = fill_unscored_watchlist_gaps(df_all, effective_tickers)
+
                 self._scored_cache = df_all if df_all is not None else pd.DataFrame()
                 self._scored_universe_key = universe_key
                 self._scored_universe_label = universe_label
+                if not from_cache:
+                    clear_ticker_evaluation_session_cache()
                 cancelled = bool(cancel_ev is not None and cancel_ev.is_set())
                 if (
                     not from_cache
@@ -1209,7 +1223,7 @@ class LeaderboardView(BaseView):
         self._rebuild_table_columns()
         if needs_refresh:
             msg = empty_message or (
-                "Click Refresh rankings to score your focus watchlist from local data."
+                "Click Refresh rankings to score your watchlist from local data."
             )
             self._set_table_rows(build_info_row(self.page_ref, msg))
             self._flush_table_updates()

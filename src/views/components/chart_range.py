@@ -60,12 +60,46 @@ def chart_range_selector(
 ) -> ft.SegmentedButton:
     """Dashboard-style Week / Month / YTD / 1Y segmented control."""
     initial = selected if selected in _LABELS else DEFAULT_CHART_RANGE
-    return ft.SegmentedButton(
+    return chart_toggle_selector(
+        CHART_RANGE_OPTIONS,
         selected=[initial],
-        allow_empty_selection=False,
+        on_change=on_change,
+        allow_multiple=False,
+        allow_empty=False,
+    )
+
+
+def chart_toggle_selector(
+    options: tuple[tuple[str, str], ...],
+    *,
+    selected: list[str] | None = None,
+    on_change: Callable | None = None,
+    allow_multiple: bool = True,
+    allow_empty: bool = False,
+) -> ft.SegmentedButton:
+    """Multi- or single-select SegmentedButton (same UX shell as ``chart_range_selector``)."""
+    valid = {key for key, _ in options}
+    initial = [key for key in (selected or []) if key in valid]
+    if not initial and not allow_empty and options:
+        initial = [options[0][0]]
+    return ft.SegmentedButton(
+        selected=initial,
+        allow_empty_selection=allow_empty,
+        allow_multiple_selection=allow_multiple,
         segments=[
             ft.Segment(value=key, label=ft.Text(label))
-            for key, label in CHART_RANGE_OPTIONS
+            for key, label in options
         ],
         on_change=on_change,
     )
+
+
+def selected_chart_toggles(
+    selector: ft.SegmentedButton | None,
+    *,
+    default: list[str] | None = None,
+) -> list[str]:
+    """Read selected segment values from a toggle SegmentedButton."""
+    if selector is None:
+        return list(default or [])
+    return list(getattr(selector, "selected", None) or default or [])

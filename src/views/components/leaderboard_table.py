@@ -8,7 +8,7 @@ import flet as ft
 import pandas as pd
 
 from src.analysis.leaderboard import LeaderboardSegment
-from src.analysis.leaderboard_scoring import CANSLIM_RULE_COUNT
+from src.analysis.canslim_core import CANSLM_RULE_COUNT, format_canslm_tooltip
 from src.utils.format_utils import format_number
 from src.views.theme import Palette, ThemeHelper
 
@@ -89,11 +89,11 @@ LEADERBOARD_COLUMN_DEFS: tuple[LeaderboardColumnDef, ...] = (
     ),
     LeaderboardColumnDef(
         "canslim_score",
-        "CANSLIM",
-        f"How many of {CANSLIM_RULE_COUNT} letter rules pass on the latest bar: "
-        f"C, A, N, S, L, M (shown as n/{CANSLIM_RULE_COUNT}). S may pass via strength "
-        "or breakout volume. Not proprietary IBD EPS Rating. Stock Detail uses a "
-        "separate 7-letter interactive score that also includes Institutions (I).",
+        "CANSLM",
+        f"How many of {CANSLM_RULE_COUNT} letter rules pass on the latest bar: "
+        f"C, A, N, S, L, M (shown as n/{CANSLM_RULE_COUNT}). Uses the same "
+        "evaluation as Stock Detail. Not proprietary IBD EPS Rating. "
+        "Hover a row score for each letter result.",
         numeric=True,
     ),
     LeaderboardColumnDef(
@@ -118,16 +118,16 @@ LEADERBOARD_COLUMN_DEFS: tuple[LeaderboardColumnDef, ...] = (
         "pass_setup",
         "Setup",
         "Yes only if C, A, N, L, and M all pass on the latest bar (stricter than "
-        f"the CANSLIM count — S is not required for Setup). When pattern is required "
+        f"the CANSLM count — S is not required for Setup). When pattern is required "
         "in settings, cup-with-handle must pass too. A stock can show "
-        f"5/{CANSLIM_RULE_COUNT} CANSLIM and still fail Setup.",
+        f"5/{CANSLM_RULE_COUNT} CANSLM and still fail Setup.",
     ),
     LeaderboardColumnDef(
         "pass_pattern",
         "Pattern",
         "Yes if the cup-with-handle detector passes on the latest bar (used in "
-        "composite score and Breakouts segment; not counted in the CANSLIM "
-        f"n/{CANSLIM_RULE_COUNT} column).",
+        "composite score and Breakouts segment; not counted in the CANSLM "
+        f"n/{CANSLM_RULE_COUNT} column).",
     ),
     LeaderboardColumnDef(
         "risk_flag",
@@ -145,7 +145,7 @@ Composite score v2 (0–100, default)
   • Risk / Regime — 20%
   • Sentiment / Catalyst — 10%
 
-Composite v1 (legacy): CANSLIM 35%, Pattern 20%, RS 20%, Volume 15%, News 10%
+Composite v1 (legacy): CANSLM 35%, Pattern 20%, RS 20%, Volume 15%, News 10%
 
 Action scores: Buy Ready (deploy cash) · Sell Press (trim/sell urgency)
 
@@ -256,6 +256,11 @@ def build_leaderboard_row_cells(
     sym = str(row.get("ticker", ""))
     composite = float(row.get("composite_score", 0) or 0)
     canslim_n = int(row.get("canslim_score", 0) or 0)
+    canslm_tooltip = str(row.get("canslm_tooltip") or "").strip()
+    if not canslm_tooltip:
+        raw_lines = row.get("canslm_lines")
+        if isinstance(raw_lines, list) and raw_lines:
+            canslm_tooltip = format_canslm_tooltip(raw_lines)
     industry = str(row.get("industry", "") or row.get("sector", "") or "—")[:32]
     setup = bool(row.get("pass_setup", False))
     pattern = bool(row.get("pass_pattern", False))
@@ -321,7 +326,10 @@ def build_leaderboard_row_cells(
             )
         ),
         ft.DataCell(ft.Text(_fmt_num(conf * 100, decimals=0))),
-        ft.DataCell(ft.Text(f"{canslim_n}/{CANSLIM_RULE_COUNT}")),
+        ft.DataCell(
+            ft.Text(f"{canslim_n}/{CANSLM_RULE_COUNT}"),
+            tooltip=canslm_tooltip or None,
+        ),
         ft.DataCell(ft.Text(_fmt_num(row.get("rs_pct"), decimals=1))),
         ft.DataCell(ft.Text(_fmt_num(row.get("volume_ratio"), decimals=2))),
         ft.DataCell(ft.Text(_fmt_num(row.get("near_high_pct"), decimals=1))),

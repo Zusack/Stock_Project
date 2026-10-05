@@ -9,6 +9,7 @@ from src.analysis.db import db_connection, ingest_write_lock
 
 WATCHLIST_KIND_USER = "user"
 WATCHLIST_KIND_HOLDINGS = "holdings"
+DEFAULT_WATCHLIST_NAME = "My Watchlist"
 
 
 @dataclass
@@ -73,6 +74,90 @@ def _seed_defaults(db_path: str) -> None:
                 (name, kind, order, now),
             )
         conn.commit()
+
+
+def _collect_saved_watchlist_symbols(
+    db_path: str,
+    *,
+    watchlist_name: str | None = None,
+    limit: int | None = None,
+) -> list[str]:
+    """Saved watchlist tickers; default list first, then other lists, deduped."""
+    ensure_watchlist_schema(db_path)
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def _take(members: list[WatchlistMember]) -> None:
+        for m in members:
+            sym = str(m.ticker or "").strip().upper()
+            if sym and sym not in seen:
+                seen.add(sym)
+                ordered.append(sym)
+
+    if watchlist_name:
+        wl = get_watchlist_by_name(db_path, watchlist_name)
+        if wl:
+            _take(list_members(db_path, wl.id))
+        return ordered[:limit] if limit is not None else ordered
+
+    default = get_watchlist_by_name(db_path, DEFAULT_WATCHLIST_NAME)
+    if default:
+        _take(list_members(db_path, default.id))
+    for wl in list_watchlists(db_path):
+        if default and wl.id == default.id:
+            continue
+        _take(list_members(db_path, wl.id))
+
+    if limit is not None:
+        return ordered[:limit]
+    return ordered
+
+
+def list_default_watchlist_symbols(
+    db_path: str,
+    *,
+    watchlist_name: str = DEFAULT_WATCHLIST_NAME,
+    limit: int | None = None,
+) -> list[str]:
+    """Symbols from one named watchlist, preserving member order."""
+    return _collect_saved_watchlist_symbols(
+        db_path,
+        watchlist_name=watchlist_name,
+        limit=limit,
+    )
+
+
+def resolve_watchlist_symbols(
+    db_path: str,
+    *,
+    limit: int | None = None,
+) -> list[str]:
+    """User-facing watchlist symbols: all saved lists, then registry focus fallback."""
+    syms = _collect_saved_watchlist_symbols(db_path, limit=limit)
+    if syms:
+        return syms
+    try:
+        from src.analysis.ticker_registry import list_focus_symbols
+
+        focus = list_focus_symbols(db_path)
+    except Exception:
+        return []
+    out = [r.symbol for r in focus if r.symbol]
+    if limit is not None:
+        return out[:limit]
+    return out
+
+
+def sync_watchlist_members_to_registry(db_path: str) -> int:
+    """Ensure every saved watchlist symbol is in the research-universe registry."""
+    from src.analysis.ticker_registry import POOL_UNIVERSE, add_symbol, ensure_registry
+
+    ensure_registry(db_path)
+    added = 0
+    for sym in _collect_saved_watchlist_symbols(db_path):
+        if add_symbol(db_path, sym, pool=POOL_UNIVERSE):
+            added += 1
+    return added
 
 
 def sync_focus_to_default_watchlist(db_path: str) -> int:
@@ -234,9 +319,20 @@ def add_member(db_path: str, watchlist_id: int, ticker: str) -> dict:
                     (watchlist_id, sym, now),
                 )
                 conn.commit()
+        _register_watchlist_symbol(db_path, sym)
         return {"ok": True}
     except sqlite3.OperationalError as ex:
         return {"ok": False, "error": str(ex)}
+
+
+def _register_watchlist_symbol(db_path: str, symbol: str) -> None:
+    """Add symbol to the research universe registry so ingest can fetch prices."""
+    try:
+        from src.analysis.ticker_registry import POOL_UNIVERSE, add_symbol
+
+        add_symbol(db_path, symbol, pool=POOL_UNIVERSE)
+    except Exception:
+        pass
 
 
 def remove_member(db_path: str, watchlist_id: int, ticker: str) -> dict:

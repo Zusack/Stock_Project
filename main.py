@@ -54,6 +54,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from apps.desktop.main import run  # noqa: E402
 from src.analysis.db import ensure_db_ready  # noqa: E402
+from src.analysis.backtest_schema import ensure_backtest_schema  # noqa: E402
 from src.analysis.intelligence_schema import ensure_intelligence_schema  # noqa: E402
 from src.analysis.llm_schema import ensure_llm_schema  # noqa: E402
 from src.services.stock_config import stock_config  # noqa: E402
@@ -92,6 +93,7 @@ if __name__ == "__main__":
     if db_status.get("exists"):
         try:
             ensure_intelligence_schema(stock_config().db_path)
+            ensure_backtest_schema(stock_config().db_path)
             ensure_llm_schema(stock_config().db_path)
         except Exception as ex:
             app_logger.log(

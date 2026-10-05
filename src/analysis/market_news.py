@@ -11,7 +11,7 @@ from src.analysis.news_sources.aggregator import fetch_headlines_for_ticker, per
 from src.analysis.news_sources.rss_fetcher import fetch_sec_press_releases
 from src.analysis.news_sources.types import NewsHeadline
 from src.analysis.quote_snapshot import QuoteSnapshot, get_quotes_bulk
-from src.analysis.ticker_registry import list_focus_symbols
+from src.analysis.watchlist_schema import resolve_watchlist_symbols
 
 # Market-wide and international proxies (free via Yahoo)
 MARKET_TICKERS: tuple[str, ...] = ("^GSPC", "SPY")
@@ -107,7 +107,7 @@ def build_dashboard_news_feed(
                 return list(cached[1])
 
     if watchlist_symbols is None:
-        watchlist_symbols = [r.symbol for r in list_focus_symbols(db_path)]
+        watchlist_symbols = resolve_watchlist_symbols(db_path)
 
     watchlist_symbols = [str(s).strip().upper() for s in watchlist_symbols if s]
     quotes = get_quotes_bulk(db_path, watchlist_symbols) if watchlist_symbols else {}

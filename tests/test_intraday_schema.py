@@ -77,10 +77,37 @@ def test_resolve_stream_symbols_chart_only(monkeypatch):
         lambda: _Cfg(),
     )
     monkeypatch.setattr(
-        "src.services.live_stream_service.list_focus_symbols",
+        "src.services.live_stream_service.resolve_watchlist_symbols",
         lambda _db: [],
     )
 
     svc = live_stream_service()
     symbols = svc.resolve_stream_symbols(chart_symbol="aapl", extra_symbols=["msft", "AAPL"])
     assert symbols == ["AAPL", "MSFT"]
+
+
+def test_resolve_stream_symbols_reserves_chart_and_extras(monkeypatch):
+    """Focus list is large; chart + Also stream must still make the 30-cap."""
+
+    class _Cfg:
+        db_path = "/unused/test.db"
+        live_stream_symbols_source = "focus"
+
+    focus = [f"F{i:02d}" for i in range(40)]
+    monkeypatch.setattr(
+        "src.services.live_stream_service.stock_config",
+        lambda: _Cfg(),
+    )
+    monkeypatch.setattr(
+        "src.services.live_stream_service.resolve_watchlist_symbols",
+        lambda _db: focus,
+    )
+
+    svc = live_stream_service()
+    symbols = svc.resolve_stream_symbols(
+        chart_symbol="AAPL",
+        extra_symbols=["MSFT", "NVDA"],
+    )
+    assert symbols[:3] == ["AAPL", "MSFT", "NVDA"]
+    assert len(symbols) == 30
+    assert "AAPL" in symbols and "MSFT" in symbols and "NVDA" in symbols

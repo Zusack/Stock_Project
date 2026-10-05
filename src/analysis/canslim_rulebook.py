@@ -55,6 +55,8 @@ class EntryRules:
 
 @dataclass(frozen=True)
 class ExitRules:
+    # Stored as a signed fraction from entry (negative). Callers may pass a
+    # positive magnitude; rule_set_from_config / evaluate_exit normalize it.
     stop_loss_pct: float = -0.08
     take_profit_pct: float = 0.25
     profit_zone_min_pct: float = 0.20
@@ -63,6 +65,27 @@ class ExitRules:
     use_market_downtrend_exit: bool = True
     round_trip_min_gain_pct: float = 0.10
     round_trip_exit_if_below_entry: bool = True
+    # IBD 8-week hold: if +20% within ~3 weeks of buy, defer profit-taking
+    # until ~8 weeks (stop loss still applies).
+    eight_week_hold_enabled: bool = True
+    eight_week_hold_surge_pct: float = 0.20
+    eight_week_hold_surge_bars: int = 15
+    eight_week_hold_min_bars: int = 40
+
+
+def normalize_stop_loss_pct(value: float) -> float:
+    """CANSLIM exits compare pct_change <= stop; stop must be negative."""
+    v = float(value)
+    if v == 0:
+        return -0.08
+    return -abs(v)
+
+
+def normalize_take_profit_pct(value: float) -> float:
+    v = float(value)
+    if v == 0:
+        return 0.25
+    return abs(v)
 
 
 @dataclass(frozen=True)
@@ -133,14 +156,26 @@ def rule_set_from_config(
     entry_rules = base.entry
     if stop_loss is not None or take_profit is not None:
         exit_rules = ExitRules(
-            stop_loss_pct=stop_loss if stop_loss is not None else exit_rules.stop_loss_pct,
-            take_profit_pct=take_profit if take_profit is not None else exit_rules.take_profit_pct,
+            stop_loss_pct=(
+                normalize_stop_loss_pct(stop_loss)
+                if stop_loss is not None
+                else exit_rules.stop_loss_pct
+            ),
+            take_profit_pct=(
+                normalize_take_profit_pct(take_profit)
+                if take_profit is not None
+                else exit_rules.take_profit_pct
+            ),
             profit_zone_min_pct=exit_rules.profit_zone_min_pct,
             profit_zone_max_pct=exit_rules.profit_zone_max_pct,
             use_below_sma50_exit=exit_rules.use_below_sma50_exit,
             use_market_downtrend_exit=exit_rules.use_market_downtrend_exit,
             round_trip_min_gain_pct=exit_rules.round_trip_min_gain_pct,
             round_trip_exit_if_below_entry=exit_rules.round_trip_exit_if_below_entry,
+            eight_week_hold_enabled=exit_rules.eight_week_hold_enabled,
+            eight_week_hold_surge_pct=exit_rules.eight_week_hold_surge_pct,
+            eight_week_hold_surge_bars=exit_rules.eight_week_hold_surge_bars,
+            eight_week_hold_min_bars=exit_rules.eight_week_hold_min_bars,
         )
     if require_pattern is not None:
         entry_rules = EntryRules(
